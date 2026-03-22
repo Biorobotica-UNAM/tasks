@@ -16,7 +16,7 @@ enum class State {
 
 class SeatFinderNode : public rclcpp::Node {
 public:
-    SeatFinderNode() : Node("seat_finder_fsm"), state_(State::SEARCHING) {
+    SeatFinderNode() : Node("seat_finder_fsm"), state_(State::SEARCHING), seat_found_(false) {
         // Inicializamos variables de paneo
         target_pan_ = -1.57; // Empezamos en el extremo izquierdo
         pan_increment_ = 0.52; // Incrementos de ~30 grados
@@ -42,6 +42,7 @@ private:
                 if (std::abs(current_pan_ - target_pan_) < 0.1) {
                     RCLCPP_INFO(this->get_logger(), "Posición alcanzada. Buscando asiento...");
                     call_seat_service();
+                    state_ = State::PANNING;  // Cambiar a PANNING después de llamar el servicio
                 } else {
                     // Si aún no llega, seguimos publicando la meta
                     publish_head_goal(target_pan_);
@@ -49,7 +50,9 @@ private:
                 break;
 
             case State::PANNING:
-                move_to_next_position();
+                if (!waiting_for_service_) {
+                    move_to_next_position();
+                }
                 break;
 
             case State::SUCCESS:
@@ -67,10 +70,16 @@ private:
     void move_to_next_position() {
         target_pan_ += pan_increment_;
 
-        // Si excedemos el límite, reiniciamos o nos detenemos
+        // Si excedemos el límite, terminamos el escaneo
         if (target_pan_ > 1.57) {
-            RCLCPP_WARN(this->get_logger(), "Se recorrió todo el rango y no se encontró nada.");
-            state_ = State::FAILURE;
+            if (seat_found_) {
+                RCLCPP_INFO(this->get_logger(), "Escaneo completo. Asiento libre encontrado.");
+                state_ = State::SUCCESS;
+            } else {
+                RCLCPP_WARN(this->get_logger(), "Escaneo completo. No se encontró ningún asiento libre.");
+                state_ = State::FAILURE;
+            }
+            return;
         }
 
         RCLCPP_INFO(this->get_logger(), "Cambiando objetivo de paneo a: %.2f", target_pan_);
@@ -82,7 +91,7 @@ private:
 
     void publish_head_goal(double pan_val) {
         auto msg = std_msgs::msg::Float64MultiArray();
-        msg.data = {pan_val, 0.0}; // Pan y Tilt (tilt en 0)
+        msg.data = {pan_val, tilt_val}; // Pan y Tilt (tilt en 0)
         head_gp_publisher_->publish(msg);
     }
 
@@ -102,10 +111,10 @@ private:
         waiting_for_service_ = false;
         auto response = future.get();
         if (response->success) {
-            RCLCPP_INFO(this->get_logger(), "¡ASIENTO ENCONTRADO!");
-            state_ = State::SUCCESS;
+            RCLCPP_INFO(this->get_logger(), "Asiento libre encontrado en esta posición.");
+            seat_found_ = true;
         } else {
-            state_ = State::PANNING;
+            RCLCPP_INFO(this->get_logger(), "No se encontró asiento libre en esta posición.");
         }
     }
 
@@ -123,6 +132,8 @@ private:
     float target_pan_;
     float pan_increment_;
     bool waiting_for_service_ = false;
+    bool seat_found_;
+    const float tilt_val = -0.5;
 
     rclcpp::TimerBase::SharedPtr timer_;
     rclcpp::Client<std_srvs::srv::Trigger>::SharedPtr client_;
