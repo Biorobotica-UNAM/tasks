@@ -8,18 +8,25 @@
 using namespace std::chrono_literals;
 
 enum class State {
-    SEARCHING,
-    PANNING,
+    MOVING_HEAD,
+    WAITING_HEAD,
+    REQUESTING_SERVICE,
+    WAITING_FOR_RESPONSE,
     SUCCESS, 
     FAILURE
 };
 
+//TODO: hacer esta wea como action en vez de servicio
+
 class SeatFinderNode : public rclcpp::Node {
 public:
-    SeatFinderNode() : Node("seat_finder_fsm"), state_(State::SEARCHING), seat_found_(false) {
+    SeatFinderNode() : Node("seat_finder_fsm"), seat_found_(false) {
         // Inicializamos variables de paneo
         target_pan_ = -1.57; // Empezamos en el extremo izquierdo
         pan_increment_ = 0.52; // Incrementos de ~30 grados
+
+        state_ = State::MOVING_HEAD;
+        waiting_for_service_ = false;
         
         head_gp_publisher_ = this->create_publisher<std_msgs::msg::Float64MultiArray>("/hardware/head/goal_pose", 1);
         
@@ -37,57 +44,42 @@ public:
 private:
     void control_loop() {
         switch (state_) {
-            case State::SEARCHING:
-                // Solo llamamos al servicio si la cabeza ya está cerca del objetivo actual
-                if (std::abs(current_pan_ - target_pan_) < 0.1) {
-                    RCLCPP_INFO(this->get_logger(), "Posición alcanzada. Buscando asiento...");
-                    call_seat_service();
-                    state_ = State::PANNING;  // Cambiar a PANNING después de llamar el servicio
-                } else {
-                    // Si aún no llega, seguimos publicando la meta
-                    publish_head_goal(target_pan_);
+            case State::MOVING_HEAD:
+                RCLCPP_INFO(this->get_logger(), "Moviendo cabeza a %.2f", target_pan_);
+                publish_head_goal(target_pan_);
+                state_ = State::WAITING_HEAD;
+                break;
+
+            case State::WAITING_HEAD:
+                if (std::abs(current_pan_ - target_pan_) < 0.05) {
+                    RCLCPP_INFO(this->get_logger(), "Cabeza en posición.");
+                    state_ = State::REQUESTING_SERVICE;
                 }
                 break;
 
-            case State::PANNING:
-                if (!waiting_for_service_) {
-                    move_to_next_position();
-                }
+            case State::REQUESTING_SERVICE:
+                RCLCPP_INFO(this->get_logger(), ">>> LLAMANDO AL SERVICIO...");
+                call_seat_service();
+                state_ = State::WAITING_FOR_RESPONSE;
+                break;
+
+            case State::WAITING_FOR_RESPONSE:
+                // AQUÍ EL NODO NO HACE NADA. 
+                // El timer entra y sale sin ejecutar lógica hasta que el callback cambie el estado.
                 break;
 
             case State::SUCCESS:
-                target_pan_ = 0.0;
-                publish_head_goal(target_pan_);
+                RCLCPP_INFO(this->get_logger(), "TERMINADO: Asiento libre encontrado.");
+                timer_->cancel();
                 break;
-            
+
             case State::FAILURE:
+                RCLCPP_ERROR(this->get_logger(), "TERMINADO: No se encontró nada.");
+                timer_->cancel();
                 break;
-                
-                
         }
     }
 
-    void move_to_next_position() {
-        target_pan_ += pan_increment_;
-
-        // Si excedemos el límite, terminamos el escaneo
-        if (target_pan_ > 1.57) {
-            if (seat_found_) {
-                RCLCPP_INFO(this->get_logger(), "Escaneo completo. Asiento libre encontrado.");
-                state_ = State::SUCCESS;
-            } else {
-                RCLCPP_WARN(this->get_logger(), "Escaneo completo. No se encontró ningún asiento libre.");
-                state_ = State::FAILURE;
-            }
-            return;
-        }
-
-        RCLCPP_INFO(this->get_logger(), "Cambiando objetivo de paneo a: %.2f", target_pan_);
-        publish_head_goal(target_pan_);
-        
-        // Volvemos a SEARCHING para verificar esta nueva posición
-        state_ = State::SEARCHING;
-    }
 
     void publish_head_goal(double pan_val) {
         auto msg = std_msgs::msg::Float64MultiArray();
@@ -95,29 +87,42 @@ private:
         head_gp_publisher_->publish(msg);
     }
 
-    void call_seat_service() {
-        if (!client_->wait_for_service(100ms)) return;
+    bool call_seat_service() {
+        if (!client_->wait_for_service(100ms)) {
+            RCLCPP_WARN(this->get_logger(), "Servicio /check_seats no disponible.");
+            return false;
+        }
 
         auto request = std::make_shared<std_srvs::srv::Trigger::Request>();
-        // Usamos un sistema simple para no saturar de llamadas mientras esperamos respuesta
+        
+        // Solo enviamos si no hay una petición pendiente (doble seguro)
         if (!waiting_for_service_) {
             waiting_for_service_ = true;
             client_->async_send_request(request, 
                 std::bind(&SeatFinderNode::service_callback, this, std::placeholders::_1));
+            return true;
         }
+        return false;
     }
 
     void service_callback(rclcpp::Client<std_srvs::srv::Trigger>::SharedFuture future) {
-        waiting_for_service_ = false;
         auto response = future.get();
+        waiting_for_service_ = false; // Liberamos la bandera
+
         if (response->success) {
-            RCLCPP_INFO(this->get_logger(), "Asiento libre encontrado en esta posición.");
-            seat_found_ = true;
+            state_ = State::SUCCESS;
         } else {
-            RCLCPP_INFO(this->get_logger(), "No se encontró asiento libre en esta posición.");
+            RCLCPP_INFO(this->get_logger(), "<<< Servicio respondió: No hay asiento.");
+            
+            target_pan_ += pan_increment_;
+            if (target_pan_ > 1.57) {
+                state_ = State::FAILURE;
+            } else {
+                RCLCPP_INFO(this->get_logger(), "Preparando siguiente movimiento a %.2f", target_pan_);
+                state_ = State::MOVING_HEAD; // Volvemos a empezar el ciclo de movimiento
+            }
         }
     }
-
     void current_pose_cb(const std_msgs::msg::Float64MultiArray::SharedPtr msg) {
         if (msg->data.size() >= 2) {
             current_pan_ = static_cast<float>(msg->data[0]);
@@ -143,7 +148,12 @@ private:
 
 int main(int argc, char **argv) {
     rclcpp::init(argc, argv);
-    rclcpp::spin(std::make_shared<SeatFinderNode>());
+    auto node = std::make_shared<SeatFinderNode>();
+    
+    rclcpp::executors::MultiThreadedExecutor executor;
+    executor.add_node(node);
+    executor.spin();
+    
     rclcpp::shutdown();
     return 0;
 }

@@ -11,12 +11,12 @@ find_package(rclcpp REQUIRED)
 find_package(std_srvs REQUIRED)
 find_package(std_msgs REQUIRED)
 
-add_executable(find_seat_server src/find_seat_server.cpp)
-ament_target_dependencies(find_seat_server
+add_executable(find_seat_action src/find_seat_action.cpp)
+ament_target_dependencies(find_seat_action
  rclcpp std_srvs std_msgs)
 
 install(TARGETS
-  find_seat_server
+  find_seat_action
   DESTINATION lib/${PROJECT_NAME}
 )
 
