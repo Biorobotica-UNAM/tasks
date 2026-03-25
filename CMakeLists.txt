@@ -10,10 +10,12 @@ find_package(ament_cmake REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(std_srvs REQUIRED)
 find_package(std_msgs REQUIRED)
+find_package(vision_interfaces REQUIRED)
+find_package(geometry_msgs REQUIRED)
 
 add_executable(find_seat_action src/find_seat_action.cpp)
 ament_target_dependencies(find_seat_action
- rclcpp std_srvs std_msgs)
+ rclcpp std_srvs std_msgs vision_interfaces)
 
 install(TARGETS
   find_seat_action
