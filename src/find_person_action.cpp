@@ -13,13 +13,13 @@
 
 using namespace std::chrono_literals;
 
-enum class PersonState {
+enum class State {
     IDLE,
     MOVING_HEAD,
     WAITING_HEAD,
-    CALLING_DETECTION,   // Nuevo
-    CALLING_IDENTIFY,    // Nuevo
-    WAITING_SERVICE,     // Para que el loop no haga nada mientras llega la respuesta
+    CALLING_DETECTION,
+    CALLING_IDENTIFY,
+    WAITING_SERVICE, 
     LOOK_AT_TARGET,
     IDENTIFYING_TARGET,
     SUCCESS,
@@ -30,8 +30,8 @@ class PersonFinderNode : public rclcpp::Node {
 public:
     PersonFinderNode() : Node("person_finder_fsm") {
         cb_group_ = this->create_callback_group(rclcpp::CallbackGroupType::Reentrant);
-        auto sub_opt = rclcpp::SubscriptionOptions();
-        sub_opt.callback_group = cb_group_;
+        auto options = rclcpp::SubscriptionOptions();
+        options.callback_group = cb_group_;
 
         // --- Publishers y Subscribers ---
         head_pub_ = this->create_publisher<std_msgs::msg::Float64MultiArray>("/hardware/head/goal_pose", 1);
@@ -39,27 +39,27 @@ public:
         
         head_sub_ = this->create_subscription<std_msgs::msg::Float64MultiArray>(
             "/hardware/head/current_pose", 10,
-            std::bind(&PersonFinderNode::head_pose_cb, this, std::placeholders::_1), sub_opt);
+            std::bind(&PersonFinderNode::head_pose_cb, this, std::placeholders::_1), options);
 
         // --- Clientes de Visión ---
-        // Servicio 1: Solo detecta si hay humanos (Trigger)
-        detect_client_ = this->create_client<std_srvs::srv::Trigger>("/vision/detect_person", 
+        // Servicio 1: Solo detecta si hay humanos
+        detect_client_ = this->create_client<faces_interfaces::srv::FaceRecog>("/vision/detect_person", 
             rmw_qos_profile_services_default, cb_group_);
         
-        // Servicio 2: Identifica por nombre (Custom)
+        // Servicio 2: Identifica por nombre 
         identify_client_ = this->create_client<faces_interfaces::srv::FaceRecog>("/vision/identify_person", 
             rmw_qos_profile_services_default, cb_group_);
 
         // --- Servicio de Tarea (El que tú llamas) ---
         task_service_ = this->create_service<faces_interfaces::srv::FaceRecog>(
-            "/tasks/find_specific_person",
+            "/tasks/find_person",
             std::bind(&PersonFinderNode::handle_task, this, std::placeholders::_1, std::placeholders::_2),
             rmw_qos_profile_services_default, cb_group_);
 
         timer_ = this->create_wall_timer(500ms, std::bind(&PersonFinderNode::control_loop, this), cb_group_);
         
-        state_ = PersonState::IDLE;
-        RCLCPP_INFO(this->get_logger(), "FSM de Personas lista.");
+        state_ = State::IDLE;
+        RCLCPP_INFO(this->get_logger(), "Find person action ready.");
     }
 
 private:
@@ -67,52 +67,52 @@ private:
     void handle_task(const faces_interfaces::srv::FaceRecog::Request::SharedPtr req,
                       faces_interfaces::srv::FaceRecog::Response::SharedPtr res) 
     {
-        if (state_ != PersonState::IDLE) {
-            res->success = false;
-            return;
-        }
+        if (state_ != State::IDLE) return;
 
         target_name_ = req->name;
-        target_pan_ = -1.57; // Empezamos desde la derecha
-        state_ = PersonState::MOVING_HEAD;
+        target_is_specified_ = !target_name_.empty();
 
-        RCLCPP_INFO(this->get_logger(), "Buscando a: %s", target_name_.c_str());
+        target_pan_ = -1.57;
+        state_ = State::MOVING_HEAD;
+
+        RCLCPP_INFO(this->get_logger(), target_is_specified_ ? 
+                "Buscando a: %s" : "Buscando a cualquier persona", target_name_.c_str());
 
         rclcpp::Rate loop_rate(10);
-        while (state_ != PersonState::SUCCESS && state_ != PersonState::FAILURE && rclcpp::ok()) {
+        while (state_ != State::SUCCESS && state_ != State::FAILURE && rclcpp::ok()) {
             loop_rate.sleep();
         }
 
-        res->success = (state_ == PersonState::SUCCESS);
+        res->success = (state_ == State::SUCCESS);
         //res->point = last_person_pose_;
 
-        state_ = PersonState::IDLE;
+        state_ = State::IDLE;
     }
 
     void control_loop() {
-        if (state_ == PersonState::IDLE || state_ == PersonState::WAITING_SERVICE) return;
+        if (state_ == State::IDLE || state_ == State::WAITING_SERVICE) return;
 
         switch (state_) {
-            case PersonState::MOVING_HEAD:
+            case State::MOVING_HEAD:
                 publish_head(target_pan_);
-                state_ = PersonState::WAITING_HEAD;
+                state_ = State::WAITING_HEAD;
                 break;
 
-            case PersonState::WAITING_HEAD:
+            case State::WAITING_HEAD:
                 if (std::abs(current_pan_ - target_pan_) < 0.05) {
-                    state_ = PersonState::CALLING_DETECTION; 
+                    state_ = State::CALLING_DETECTION; 
                 }
                 break;
 
-            case PersonState::CALLING_DETECTION:
+            case State::CALLING_DETECTION:
                 call_detect_anyone(); 
                 break;
 
-            case PersonState::IDENTIFYING_TARGET: // Este estado ahora se activa desde la lambda de detección
+            case State::IDENTIFYING_TARGET: // Este estado ahora se activa desde la lambda de detección
                 call_identify_target(); 
                 break;
 
-            case PersonState::LOOK_AT_TARGET:
+            case State::LOOK_AT_TARGET:
                 execute_look_at();
                 break;
             
@@ -121,16 +121,23 @@ private:
     }
     // Servicio 1: ¿Hay alguien? (Detección rápida)
     void call_detect_anyone() {
-        state_ = PersonState::WAITING_SERVICE; // Bloqueamos el paso en el control_loop
+        state_ = State::WAITING_SERVICE;
         
-        auto req = std::make_shared<std_srvs::srv::Trigger::Request>();
-        detect_client_->async_send_request(req, [this](rclcpp::Client<std_srvs::srv::Trigger>::SharedFuture future) {
+        auto req = std::make_shared<faces_interfaces::srv::FaceRecog::Request>();
+        detect_client_->async_send_request(req, [this](rclcpp::Client<faces_interfaces::srv::FaceRecog>::SharedFuture future) {
             auto res = future.get();
             if (res->success) {
-                RCLCPP_INFO(this->get_logger(), "¡Alguien detectado!");
-                this->state_ = PersonState::IDENTIFYING_TARGET;
+                if (this->target_is_specified_) {
+                    // Si buscamos a alguien concreto, vamos al paso de identidad
+                    RCLCPP_INFO(this->get_logger(), "Persona detectada, verificando identidad...");
+                    this->state_ = State::IDENTIFYING_TARGET;
+                } else {
+                    // Si solo buscamos "un humano", ya terminamos con éxito
+                    RCLCPP_INFO(this->get_logger(), "¡Encontré a una persona!");
+                    this->state_ = State::LOOK_AT_TARGET;
+                }
             } else {
-                this->next_pan_step(); // Esto pondrá el estado en MOVING_HEAD
+                this->next_pan_step();
             }
         });
     }
@@ -138,7 +145,7 @@ private:
     // Servicio 2: ¿Es la persona que busco? (Identificación pesada)
     void call_identify_target() {
         // 1. BLOQUEO INMEDIATO
-        state_ = PersonState::WAITING_SERVICE; 
+        state_ = State::WAITING_SERVICE; 
 
         if (!identify_client_->wait_for_service(500ms)) {
             RCLCPP_WARN(this->get_logger(), "Servicio de identificación no disponible");
@@ -153,7 +160,7 @@ private:
             auto res = future.get();
             if (res->success) {
                 RCLCPP_INFO(this->get_logger(), "¡%s identificado!", target_name_.c_str());
-                this->state_ = PersonState::LOOK_AT_TARGET;
+                this->state_ = State::LOOK_AT_TARGET;
             } else {
                 RCLCPP_WARN(this->get_logger(), "No es %s, sigo buscando...", target_name_.c_str());
                 this->next_pan_step(); 
@@ -162,23 +169,19 @@ private:
     }
 
     void execute_look_at() {
-        static int count = 0;
-        last_person_pose_.header.stamp.sec = 0; // El truco del tiempo 0 que vimos
-        last_person_pose_.header.stamp.nanosec = 0;
+        //static int count = 0;
+        //last_person_pose_.header.stamp.sec = 0; // El truco del tiempo 0 que vimos
+        //last_person_pose_.header.stamp.nanosec = 0;
         //look_at_pub_->publish(last_person_pose_);
-
-        if (++count > 6) {
-            count = 0;
-            state_ = PersonState::SUCCESS;
-        }
+        state_ = State::SUCCESS;
     }
 
     void next_pan_step() {
         target_pan_ += 0.6; // Pasos más largos para personas
         if (target_pan_ > 1.57) {
-            state_ = PersonState::FAILURE;
+            state_ = State::FAILURE;
         } else {
-            state_ = PersonState::MOVING_HEAD;
+            state_ = State::MOVING_HEAD;
         }
     }
 
@@ -193,18 +196,19 @@ private:
     }
 
     // Variables
-    PersonState state_;
+    State state_;
     std::string target_name_;
     float current_pan_ = 0.0;
     float target_pan_ = 0.0;
-    geometry_msgs::msg::PointStamped last_person_pose_;
+    bool target_is_specified_ = false;
+    //geometry_msgs::msg::PointStamped last_person_pose_;
 
     rclcpp::CallbackGroup::SharedPtr cb_group_;
     rclcpp::TimerBase::SharedPtr timer_;
     rclcpp::Publisher<std_msgs::msg::Float64MultiArray>::SharedPtr head_pub_;
     rclcpp::Publisher<geometry_msgs::msg::PointStamped>::SharedPtr look_at_pub_;
     rclcpp::Subscription<std_msgs::msg::Float64MultiArray>::SharedPtr head_sub_;
-    rclcpp::Client<std_srvs::srv::Trigger>::SharedPtr detect_client_;
+    rclcpp::Client<faces_interfaces::srv::FaceRecog>::SharedPtr detect_client_;
     rclcpp::Client<faces_interfaces::srv::FaceRecog>::SharedPtr identify_client_;
     rclcpp::Service<faces_interfaces::srv::FaceRecog>::SharedPtr task_service_;
 };
