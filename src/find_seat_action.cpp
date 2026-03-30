@@ -47,8 +47,8 @@ public:
             rmw_qos_profile_services_default, cb_group_);
 
         // --- Control loop timer ---
-        timer_ = this->create_wall_timer(300ms, std::bind(&SeatFinderNode::control_loop, this), cb_group_);
         state_ = State::IDLE;
+        timer_ = this->create_wall_timer(300ms, std::bind(&SeatFinderNode::control_loop, this), cb_group_);
         RCLCPP_INFO(this->get_logger(), "Find seat action Ready.");
     }
 
@@ -68,7 +68,8 @@ private:
 
         // Bucle de espera (bloqueante para el servicio)
         rclcpp::Rate loop_rate(10); 
-        while (state_ != State::SUCCESS && state_ != State::FAILURE && rclcpp::ok()) {
+        end_of_task = false;
+        while (!end_of_task && rclcpp::ok()) {
             loop_rate.sleep();
         }
 
@@ -82,6 +83,16 @@ private:
     void control_loop() {
         // Importante: No bloqueamos NADA aquí, solo transiciones de estado rápidas
         switch (state_) {
+            case State::IDLE:
+                failure_count_ = 0;
+                break;
+
+            case State::SUCCESS:
+            case State::FAILURE:
+                end_of_task = true;
+                failure_count_ = 0;
+                break;
+                
             case State::MOVING_HEAD:
                 publish_head_goal(target_pan_);
                 state_ = State::WAITING_HEAD;
@@ -104,7 +115,7 @@ private:
 
             default: 
                 RCLCPP_DEBUG(this->get_logger(), "Waiting...");
-                if (++failure_count_ > 8 ) {
+                if (++failure_count_ > 10 ) {
                     failure_count_ = 0;
                     state_ = State::FAILURE;
                 }
@@ -113,7 +124,7 @@ private:
     }
 
     void call_vision_service() {
-        if (!vision_client_->wait_for_service(1s)) {
+        if (!vision_client_->wait_for_service(2s)) {
             state_ = State::FAILURE;
             return;
         }
@@ -162,6 +173,7 @@ private:
     const float tilt_val = -0.5;
     uint8_t failure_count_ = 0;
     geometry_msgs::msg::PointStamped final_goal;
+    bool end_of_task = false;
 
     float scan_start_ = -1.57;
     float scan_end_ = 1.57;

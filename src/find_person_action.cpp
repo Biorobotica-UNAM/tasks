@@ -50,8 +50,8 @@ public:
             rmw_qos_profile_services_default, cb_group_);
 
         // --- Control loop timer ---
-        timer_ = this->create_wall_timer(300ms, std::bind(&PersonFinderNode::control_loop, this), cb_group_);
         state_ = State::IDLE;
+        timer_ = this->create_wall_timer(300ms, std::bind(&PersonFinderNode::control_loop, this), cb_group_);
         RCLCPP_INFO(this->get_logger(), "Find person action Ready.");
     }
 
@@ -83,7 +83,8 @@ private:
 
         // Bucle de espera (bloqueante para el servicio)
         rclcpp::Rate loop_rate(10);
-        while (state_ != State::SUCCESS && state_ != State::FAILURE && rclcpp::ok()) {
+        end_of_task = false;
+        while (!end_of_task && rclcpp::ok()) {
             loop_rate.sleep();
         }
 
@@ -97,6 +98,16 @@ private:
         if (state_ == State::IDLE || state_ == State::WAITING_SERVICE) return;
 
         switch (state_) {
+            case State::IDLE:
+                failure_count_ = 0;
+                break;
+
+            case State::SUCCESS:
+            case State::FAILURE:
+                end_of_task = true;
+                failure_count_ = 0;
+                break;
+
             case State::MOVING_HEAD:
                 publish_head_goal();
                 state_ = State::WAITING_HEAD;
@@ -117,7 +128,7 @@ private:
             
             default: 
                 RCLCPP_DEBUG(this->get_logger(), "Waiting...");
-                if (++failure_count_ > 8 ) {
+                if (++failure_count_ > 10 ) {
                     failure_count_ = 0;
                     state_ = State::FAILURE;
                 }
@@ -143,7 +154,7 @@ private:
 
     void call_vision_service() {
         auto client = target_is_specified_ ? identify_client_ : detect_client_;
-        if (!client->wait_for_service(1s)) {
+        if (!client->wait_for_service(2s)) {
             state_ = State::FAILURE;
             return;
         }
@@ -184,6 +195,7 @@ private:
     bool target_is_specified_;
     float current_target_val_ = 0.0;
     uint8_t failure_count_ = 0;
+    bool end_of_task = false;
 
     // Scan config
     float scan_start_;

@@ -16,6 +16,7 @@ find_package(geometry_msgs REQUIRED)
 
 add_executable(find_seat_action src/find_seat_action.cpp)
 add_executable(find_person_action src/find_person_action.cpp)
+add_executable(find_object_action src/find_object_action.cpp)
 
 ament_target_dependencies(find_seat_action
  rclcpp std_srvs std_msgs vision_interfaces)
@@ -23,9 +24,13 @@ ament_target_dependencies(find_seat_action
  ament_target_dependencies(find_person_action
  rclcpp std_srvs std_msgs vision_interfaces faces_interfaces)
 
+ament_target_dependencies(find_object_action
+ rclcpp std_srvs std_msgs vision_interfaces geometry_msgs)
+
 install(TARGETS
   find_seat_action
   find_person_action
+  find_object_action
   DESTINATION lib/${PROJECT_NAME}
 )
 
