@@ -3,9 +3,10 @@
 #include <vector>
 #include "rclcpp/rclcpp.hpp"
 #include "std_srvs/srv/trigger.hpp"
-#include "vision_interfaces/srv/find_seat.hpp"
 #include "std_msgs/msg/float64_multi_array.hpp"
+#include "std_msgs/msg/bool.hpp"
 #include "geometry_msgs/msg/point_stamped.hpp"
+#include "vision_interfaces/srv/find_seat.hpp"
 
 using namespace std::chrono_literals;
 
@@ -13,9 +14,9 @@ enum class State {
     IDLE,
     MOVING_HEAD,
     WAITING_HEAD,
-    REQUESTING_SERVICE,
-    WAITING_FOR_RESPONSE,
-    LOOK_AT,
+    CALLING_DETECTION,
+    WAITING_SERVICE,
+    LOOK_AT_TARGET,
     SUCCESS, 
     FAILURE
 };
@@ -23,28 +24,31 @@ enum class State {
 class SeatFinderNode : public rclcpp::Node {
 public:
     SeatFinderNode() : Node("seat_finder_fsm") {
+        // --- Callback group ---
         cb_group_ = this->create_callback_group(rclcpp::CallbackGroupType::Reentrant);
-        auto options = rclcpp::SubscriptionOptions();
-        options.callback_group = cb_group_;
+        auto sub_options = rclcpp::SubscriptionOptions();
+        sub_options.callback_group = cb_group_;
         
-        state_ = State::IDLE;
+  
+        // --- Head control topics ---
+        head_gp_pub_ = this->create_publisher<std_msgs::msg::Float64MultiArray>("/hardware/head/goal_pose", 1);
+        head_gr_sub_ = this->create_subscription<std_msgs::msg::Bool>(
+            "/hardware/head/goal_reached", 1,
+            std::bind(&SeatFinderNode::head_gr_cb, this, std::placeholders::_1), sub_options);
+        head_look_at_pub_ = this->create_publisher<geometry_msgs::msg::PointStamped>("/hardware/head/look_at", 1);
         
-        head_gp_publisher_ = this->create_publisher<std_msgs::msg::Float64MultiArray>("/hardware/head/goal_pose", 1);
-        head_look_at_publisher_ = this->create_publisher<geometry_msgs::msg::PointStamped>("/hardware/head/look_at", 1);
-        
-        head_cp_subscriber_ = this->create_subscription<std_msgs::msg::Float64MultiArray>(
-            "/hardware/head/current_pose", 10, 
-            std::bind(&SeatFinderNode::current_pose_cb, this, std::placeholders::_1), options);
-        
-        client_ = this->create_client<vision_interfaces::srv::FindSeat>("/check_seats", 
+        // --- Vision service ---
+        vision_client_ = this->create_client<vision_interfaces::srv::FindSeat>("/vision/find_seat", 
             rmw_qos_profile_services_default, cb_group_);
 
+        // --- Task service ---
         task_service_ = this->create_service<std_srvs::srv::Trigger>("/tasks/find_seat",
             std::bind(&SeatFinderNode::handle_task_request, this, std::placeholders::_1, std::placeholders::_2), 
             rmw_qos_profile_services_default, cb_group_);
 
-        timer_ = this->create_wall_timer(500ms, std::bind(&SeatFinderNode::control_loop, this), cb_group_);
-        
+        // --- Control loop timer ---
+        timer_ = this->create_wall_timer(300ms, std::bind(&SeatFinderNode::control_loop, this), cb_group_);
+        state_ = State::IDLE;
         RCLCPP_INFO(this->get_logger(), "Find seat action Ready.");
     }
 
@@ -58,11 +62,11 @@ private:
             return;
         }
 
-        target_pan_ = -1.57;
+        target_pan_ = scan_start_;
         state_ = State::MOVING_HEAD;
         RCLCPP_INFO(this->get_logger(), "Request received. Starting search...");
 
-        // Este es el único bloqueo necesario: esperar a que la FSM termine
+        // Bucle de espera (bloqueante para el servicio)
         rclcpp::Rate loop_rate(10); 
         while (state_ != State::SUCCESS && state_ != State::FAILURE && rclcpp::ok()) {
             loop_rate.sleep();
@@ -81,74 +85,74 @@ private:
             case State::MOVING_HEAD:
                 publish_head_goal(target_pan_);
                 state_ = State::WAITING_HEAD;
+                failure_count_ = 0;
                 break;
 
-            case State::WAITING_HEAD:
-                if (std::abs(current_pan_ - target_pan_) < 0.05) {
-                    state_ = State::REQUESTING_SERVICE;
-                }
+            case State::CALLING_DETECTION:
+                call_vision_service();
+                state_ = State::WAITING_SERVICE;
+                failure_count_ = 0;
                 break;
 
-            case State::REQUESTING_SERVICE:
-                call_seat_service_async(); // Llamada NO bloqueante
-                state_ = State::WAITING_FOR_RESPONSE;
-                break;
-
-            case State::LOOK_AT:
+            case State::LOOK_AT_TARGET:
                 final_goal.header.stamp.sec = 0;
                 final_goal.header.stamp.nanosec = 0;
-                head_look_at_publisher_->publish(final_goal);
+                head_look_at_pub_->publish(final_goal);
+                failure_count_ = 0;
                 state_ = State::SUCCESS;
-                /*static int look_counter = 0;
-                if (look_counter == 0){
-                }
-                if (++look_counter > 4) { // 500ms * 4 = 2 segundos
-                    look_counter = 0;
-                }*/
                 break;
 
-            default: break;
+            default: 
+                RCLCPP_DEBUG(this->get_logger(), "Waiting...");
+                if (++failure_count_ > 8 ) {
+                    failure_count_ = 0;
+                    state_ = State::FAILURE;
+                }
+                break;
         }
     }
 
-    void call_seat_service_async() {
-        if (!client_->wait_for_service(1s)) {
-            RCLCPP_ERROR(this->get_logger(), "Service /check_seats not available");
+    void call_vision_service() {
+        if (!vision_client_->wait_for_service(1s)) {
             state_ = State::FAILURE;
             return;
         }
-
-        auto request = std::make_shared<vision_interfaces::srv::FindSeat::Request>();
-        RCLCPP_INFO(this->get_logger(), "Calling /check_seats...");
+        auto req = std::make_shared<vision_interfaces::srv::FindSeat::Request>();
 
         // Usamos el callback asíncrono para liberar el hilo del timer de inmediato
-        client_->async_send_request(request, [this](rclcpp::Client<vision_interfaces::srv::FindSeat>::SharedFuture future) {
+        vision_client_->async_send_request(req, [this](rclcpp::Client<vision_interfaces::srv::FindSeat>::SharedFuture future) {
             auto res = future.get();
             if (res->success) {
                 RCLCPP_INFO(this->get_logger(), "Seat found!");
                 final_goal = res->point;
-                state_ = State::LOOK_AT;
+                state_ = State::LOOK_AT_TARGET;
             } else {
-                target_pan_ += 0.52;
-                if (target_pan_ > 1.57) {
-                    RCLCPP_WARN(this->get_logger(), "Task failed. No free seat found");
-                    state_ = State::FAILURE;
-                } else {
-                    RCLCPP_INFO(this->get_logger(), "No seat, moving to %.2f", target_pan_);
-                    state_ = State::MOVING_HEAD;
-                }
+                this->next_step();
             }
         });
+    }
+
+    void next_step() {
+        target_pan_ += scan_step_;
+
+        bool finished = (target_pan_ > scan_end_);
+        if (finished) {
+            state_ = State::FAILURE;
+        } else {
+            state_ = State::MOVING_HEAD;
+        }
     }
 
     void publish_head_goal(double pan_val) {
         auto msg = std_msgs::msg::Float64MultiArray();
         msg.data = {pan_val, tilt_val};
-        head_gp_publisher_->publish(msg);
+        head_gp_pub_->publish(msg);
     }
 
-    void current_pose_cb(const std_msgs::msg::Float64MultiArray::SharedPtr msg) {
-        if (msg->data.size() >= 1) current_pan_ = static_cast<float>(msg->data[0]);
+    void head_gr_cb(const std_msgs::msg::Bool::SharedPtr msg) {
+        if (state_ == State::WAITING_HEAD && msg->data) {
+            state_ = State::CALLING_DETECTION;
+        }
     }
 
     // Miembros
@@ -156,25 +160,28 @@ private:
     float current_pan_ = 0.0;
     float target_pan_;
     const float tilt_val = -0.5;
+    uint8_t failure_count_ = 0;
     geometry_msgs::msg::PointStamped final_goal;
+
+    float scan_start_ = -1.57;
+    float scan_end_ = 1.57;
+    float scan_step_ = 0.52;
 
     rclcpp::CallbackGroup::SharedPtr cb_group_;
     rclcpp::TimerBase::SharedPtr timer_;
-    rclcpp::Client<vision_interfaces::srv::FindSeat>::SharedPtr client_;
+    rclcpp::Publisher<std_msgs::msg::Float64MultiArray>::SharedPtr head_gp_pub_;
+    rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr head_gr_sub_;
+    rclcpp::Publisher<geometry_msgs::msg::PointStamped>::SharedPtr head_look_at_pub_;
+    rclcpp::Client<vision_interfaces::srv::FindSeat>::SharedPtr vision_client_;
     rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr task_service_;
-    rclcpp::Publisher<std_msgs::msg::Float64MultiArray>::SharedPtr head_gp_publisher_;
-    rclcpp::Publisher<geometry_msgs::msg::PointStamped>::SharedPtr head_look_at_publisher_;
-    rclcpp::Subscription<std_msgs::msg::Float64MultiArray>::SharedPtr head_cp_subscriber_;
 };
 
 int main(int argc, char **argv) {
     rclcpp::init(argc, argv);
     auto node = std::make_shared<SeatFinderNode>();
-    
     rclcpp::executors::MultiThreadedExecutor executor(rclcpp::ExecutorOptions(), 4);
     executor.add_node(node);
     executor.spin();
-    
     rclcpp::shutdown();
     return 0;
 }
