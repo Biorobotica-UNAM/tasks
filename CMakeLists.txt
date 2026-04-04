@@ -12,11 +12,16 @@ find_package(std_srvs REQUIRED)
 find_package(std_msgs REQUIRED)
 find_package(vision_interfaces REQUIRED)
 find_package(faces_interfaces REQUIRED)
+find_package(take_interfaces REQUIRED)
+find_package(manipulation_planner_interfaces REQUIRED)
+find_package(manipulation_controller_interfaces REQUIRED)
 find_package(geometry_msgs REQUIRED)
+find_package(manipulation_tools REQUIRED)
 
 add_executable(find_seat_action src/find_seat_action.cpp)
 add_executable(find_person_action src/find_person_action.cpp)
 add_executable(find_object_action src/find_object_action.cpp)
+add_executable(take_node src/take_node.cpp)
 
 ament_target_dependencies(find_seat_action
  rclcpp std_srvs std_msgs vision_interfaces)
@@ -27,10 +32,14 @@ ament_target_dependencies(find_seat_action
 ament_target_dependencies(find_object_action
  rclcpp std_srvs std_msgs vision_interfaces geometry_msgs)
 
+ament_target_dependencies(take_node
+ rclcpp std_srvs std_msgs geometry_msgs take_interfaces manipulation_planner_interfaces manipulation_controller_interfaces manipulation_tools)
+
 install(TARGETS
   find_seat_action
   find_person_action
   find_object_action
+  take_node
   DESTINATION lib/${PROJECT_NAME}
 )
 
