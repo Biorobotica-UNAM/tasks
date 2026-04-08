@@ -10,6 +10,7 @@
 #include "std_msgs/msg/float64_multi_array.hpp"
 #include "std_msgs/msg/bool.hpp"
 #include "faces_interfaces/srv/face_recog.hpp" 
+#include "vision_interfaces/srv/bbox_to_pose.hpp"
 
 using namespace std::chrono_literals;
 
@@ -19,7 +20,8 @@ enum class State {
     WAITING_HEAD,
     CALLING_DETECTION,
     CALLING_IDENTIFY,
-    WAITING_SERVICE, 
+    WAITING_SERVICE,
+    CALLING_BBOX_TO_POSE_SERVICE, 
     LOOK_AT_TARGET,
     SUCCESS,
     FAILURE
@@ -38,10 +40,12 @@ public:
         head_gr_sub = this->create_subscription<std_msgs::msg::Bool>(
             "/hardware/head/goal_reached", 1,
             std::bind(&PersonFinderNode::head_gr_cb, this, std::placeholders::_1), sub_options);
+        head_look_at_pub_ = this->create_publisher<geometry_msgs::msg::PointStamped>("/hardware/head/look_at", 1);
 
         // --- Vision services ---
         detect_client_ = this->create_client<faces_interfaces::srv::FaceRecog>("/vision/detect_person", rmw_qos_profile_services_default, cb_group_);
         identify_client_ = this->create_client<faces_interfaces::srv::FaceRecog>("/vision/identify_person", rmw_qos_profile_services_default, cb_group_);
+        bbox2pose_client_ = this->create_client<vision_interfaces::srv::BboxToPose>("/vision/bbox_to_pose", rmw_qos_profile_services_default, cb_group_);
 
         // --- Task service ---
         task_service_ = this->create_service<faces_interfaces::srv::FaceRecog>(
@@ -121,10 +125,19 @@ private:
                 failure_count_ = 0;
                 break;
 
-            case State::LOOK_AT_TARGET:
-                state_ = State::SUCCESS;
-                failure_count_ = 0;
+            case State::CALLING_BBOX_TO_POSE_SERVICE:
+                RCLCPP_INFO(this->get_logger(), "Calling BBox to Pose service...");
+                call_bbox_to_pose_service();
+                state_ = State::WAITING_SERVICE; // Reutilizamos el bloqueo de espera
                 break;
+
+            case State::LOOK_AT_TARGET:
+                final_goal.header.stamp.sec = 0;
+                final_goal.header.stamp.nanosec = 0;
+                head_look_at_pub_->publish(final_goal);
+                failure_count_ = 0;
+                state_ = State::SUCCESS;
+            break;
             
             default: 
                 RCLCPP_DEBUG(this->get_logger(), "Waiting...");
@@ -163,10 +176,39 @@ private:
         if (target_is_specified_) req->name = target_name_;
 
         client->async_send_request(req, [this](rclcpp::Client<faces_interfaces::srv::FaceRecog>::SharedFuture future) {
-            if (future.get()->success) {
-                this->state_ = State::LOOK_AT_TARGET;
+            auto result = future.get();
+            if (result->success) {
+                this->last_bbox_ = result->bbox;
+                this->state_ = State::CALLING_BBOX_TO_POSE_SERVICE;
             } else {
                 this->next_step();
+            }
+        });
+    }
+
+    void call_bbox_to_pose_service() {
+        if (!bbox2pose_client_->wait_for_service(1s)) {
+            RCLCPP_ERROR(this->get_logger(), "Depth service not available");
+            state_ = State::FAILURE;
+            return;
+        }
+
+        auto req = std::make_shared<vision_interfaces::srv::BboxToPose::Request>();
+        req->x1 = last_bbox_[0];
+        req->y1 = last_bbox_[1];
+        req->x2 = last_bbox_[2];
+        req->y2 = last_bbox_[3];
+
+        bbox2pose_client_->async_send_request(req, [this](rclcpp::Client<vision_interfaces::srv::BboxToPose>::SharedFuture future) {
+            auto res = future.get();
+            if (res->success) {
+                // Llenamos el PointStamped para el look_at
+                this->final_goal.header.frame_id = res->pose.header.frame_id;
+                this->final_goal.point = res->pose.pose.position; 
+                this->state_ = State::LOOK_AT_TARGET;
+            } else {
+                RCLCPP_ERROR(this->get_logger(), "Could not get XYZ from BBox");
+                this->state_ = State::FAILURE;
             }
         });
     }
@@ -195,19 +237,23 @@ private:
     bool target_is_specified_;
     float current_target_val_ = 0.0;
     uint8_t failure_count_ = 0;
+    geometry_msgs::msg::PointStamped final_goal;
     bool end_of_task = false;
 
     // Scan config
     float scan_start_;
     float scan_end_;
     float scan_step_;
+    std::vector<float> last_bbox_;
 
     rclcpp::CallbackGroup::SharedPtr cb_group_;
     rclcpp::TimerBase::SharedPtr timer_;
     rclcpp::Publisher<std_msgs::msg::Float64MultiArray>::SharedPtr head_gp_pub_;
     rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr head_gr_sub;
+    rclcpp::Publisher<geometry_msgs::msg::PointStamped>::SharedPtr head_look_at_pub_;
     rclcpp::Client<faces_interfaces::srv::FaceRecog>::SharedPtr detect_client_;
     rclcpp::Client<faces_interfaces::srv::FaceRecog>::SharedPtr identify_client_;
+    rclcpp::Client<vision_interfaces::srv::BboxToPose>::SharedPtr bbox2pose_client_;
     rclcpp::Service<faces_interfaces::srv::FaceRecog>::SharedPtr task_service_;
 };
 
