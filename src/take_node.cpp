@@ -47,7 +47,7 @@ public:
             "/take",
             std::bind(&TakeNode::takeCallback, this,
                       std::placeholders::_1, std::placeholders::_2),
-            rclcpp::ServicesQoS(),
+             rmw_qos_profile_services_default,
             srv_cb_group_);
 
         RCLCPP_INFO(this->get_logger(), "Take node ready");
