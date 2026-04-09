@@ -14,6 +14,7 @@ enum class State {
     IDLE,
     MOVING_HEAD,
     WAITING_HEAD,
+    STABILIZING,
     CALLING_DETECTION,
     WAITING_SERVICE,
     LOOK_AT_TARGET,
@@ -108,6 +109,13 @@ private:
                 failure_count_ = 0;
                 break;
 
+            case State::STABILIZING:
+                if (++stabilize_count_ > 2) {
+                    stabilize_count_ = 0;
+                    state_ = State::CALLING_DETECTION;
+                }
+                break;
+
             case State::CALLING_DETECTION:
                 call_vision_service();
                 state_ = State::WAITING_SERVICE;
@@ -174,7 +182,7 @@ private:
 
     void head_gr_cb(const std_msgs::msg::Bool::SharedPtr msg) {
         if (state_ == State::WAITING_HEAD && msg->data) {
-            state_ = State::CALLING_DETECTION;
+            state_ = State::STABILIZING;
         }
     }
 
@@ -183,6 +191,7 @@ private:
     float target_pan_ = 0.0;
     float target_tilt_ = -0.5;
     uint8_t failure_count_ = 0;
+    uint8_t stabilize_count_ = 0;
     bool end_of_task = false;
     geometry_msgs::msg::PointStamped final_goal;
 

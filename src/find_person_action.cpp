@@ -18,6 +18,7 @@ enum class State {
     IDLE,
     MOVING_HEAD,
     WAITING_HEAD,
+    STABILIZING,
     CALLING_DETECTION,
     CALLING_IDENTIFY,
     WAITING_SERVICE,
@@ -118,6 +119,13 @@ private:
                 failure_count_ = 0;
                 break;
 
+            case State::STABILIZING:
+                if (++stabilize_count_ > 2) {
+                    stabilize_count_ = 0;
+                    state_ = State::CALLING_DETECTION;
+                }
+                break;
+
             case State::CALLING_DETECTION:
                 RCLCPP_INFO(this->get_logger(), "Detection service called");
                 call_vision_service();
@@ -161,7 +169,7 @@ private:
 
     void head_gr_cb(const std_msgs::msg::Bool::SharedPtr msg) {
         if (state_ == State::WAITING_HEAD && msg->data) {
-            state_ = State::CALLING_DETECTION;
+            state_ = State::STABILIZING;
         }
     }
 
@@ -237,6 +245,7 @@ private:
     bool target_is_specified_;
     float current_target_val_ = 0.0;
     uint8_t failure_count_ = 0;
+    uint8_t stabilize_count_ = 0;
     geometry_msgs::msg::PointStamped final_goal;
     bool end_of_task = false;
 
