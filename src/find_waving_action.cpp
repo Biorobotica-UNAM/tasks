@@ -6,7 +6,6 @@
 #include "std_msgs/msg/float64_multi_array.hpp"
 #include "std_msgs/msg/bool.hpp"
 #include "geometry_msgs/msg/point_stamped.hpp"
-// 1. Cambiamos la interfaz al servicio de humanos
 #include "human_interfaces/srv/detect_pointing.hpp" 
 
 using namespace std::chrono_literals;
@@ -27,6 +26,7 @@ class WavingHumanFinderNode : public rclcpp::Node {
 public:
     WavingHumanFinderNode() : Node("waving_finder_fsm") {
         cb_group_ = this->create_callback_group(rclcpp::CallbackGroupType::Reentrant);
+        
         auto sub_options = rclcpp::SubscriptionOptions();
         sub_options.callback_group = cb_group_;
   
@@ -37,20 +37,19 @@ public:
         
         head_look_at_pub_ = this->create_publisher<geometry_msgs::msg::PointStamped>("/hardware/head/look_at", 1);
         
-        // 2. Cliente para el detector de waving
         vision_client_ = this->create_client<human_interfaces::srv::DetectPointing>(
             "/human_detection/detect_wrist", rmw_qos_profile_services_default, cb_group_);
 
-        // 3. El servicio que ofrece este nodo (ahora Trigger o personalizado)
-        // Lo cambié a Trigger para que sea más fácil de llamar sin argumentos
         task_service_ = this->create_service<std_srvs::srv::Trigger>(
             "/tasks/find_waving_human",
             std::bind(&WavingHumanFinderNode::handle_task_request, this, std::placeholders::_1, std::placeholders::_2), 
             rmw_qos_profile_services_default, cb_group_);
 
         state_ = State::IDLE;
-        timer_ = this->create_wall_timer(300ms, std::bind(&WavingHumanFinderNode::control_loop, this), cb_group_);
-        RCLCPP_INFO(this->get_logger(), "Waving Detector FSM Ready.");
+        // Timer para la lógica de la FSM
+        timer_ = this->create_wall_timer(100ms, std::bind(&WavingHumanFinderNode::control_loop, this), cb_group_);
+        
+        RCLCPP_INFO(this->get_logger(), "Waving Detector task ready. Waiting for service calls...");
     }
 
 private:
@@ -59,46 +58,50 @@ private:
     {
         if (state_ != State::IDLE) {
             response->success = false;
-            response->message = "Already searching for a human.";
+            response->message = "FSM is busy.";
             return;
         }
 
         scan_idx_ = 0;
+        end_of_task_ = false;
         target_pan_ = scan_poses_[scan_idx_].first;
         target_tilt_ = scan_poses_[scan_idx_].second;
+        
+        RCLCPP_INFO(this->get_logger(), "New task received. Starting scan...");
         state_ = State::MOVING_HEAD;
-        RCLCPP_INFO(this->get_logger(), "Starting scan for waving humans...");
 
-        rclcpp::Rate loop_rate(10); 
-        end_of_task = false;
-        while (!end_of_task && rclcpp::ok()) {
+        rclcpp::Rate loop_rate(20); 
+        while (!end_of_task_ && rclcpp::ok()) {
             loop_rate.sleep();
         }
 
-        response->success = (state_ == State::SUCCESS);
-        response->message = response->success ? "Human found waving" : "Nobody waving found";
-        
+        if (state_ == State::SUCCESS) {
+            response->success = true;
+            response->message = "Human found waving!";
+        } else {
+            response->success = false;
+            response->message = "Search finished: Human not found.";
+        }
+
         state_ = State::IDLE;
+        RCLCPP_INFO(this->get_logger(), "DETECTION COMPLETE: %s", response->message.c_str());
     }
 
     void control_loop() {
+        // Solo actuar si no estamos en IDLE
+        if (state_ == State::IDLE) return;
+
         switch (state_) {
-            case State::IDLE:
-                failure_count_ = 0;
-                break;
-
-            case State::SUCCESS:
-            case State::FAILURE:
-                end_of_task = true;
-                break;
-
             case State::MOVING_HEAD:
                 publish_head_goal(target_pan_, target_tilt_);
                 state_ = State::WAITING_HEAD;
                 break;
 
+            case State::WAITING_HEAD:
+                break;
+
             case State::STABILIZING:
-                if (++stabilize_count_ > 3) { // Un poquito más de tiempo para que la cámara enfoque
+                if (++stabilize_count_ > 5) { 
                     stabilize_count_ = 0;
                     state_ = State::CALLING_DETECTION;
                 }
@@ -110,34 +113,41 @@ private:
                 break;
 
             case State::LOOK_AT_TARGET:
-                // Aquí podrías usar la TF que publica el nodo de Python
-                // Por ahora enviamos un punto vacío o el último conocido para confirmar éxito
                 head_look_at_pub_->publish(final_goal);
                 state_ = State::SUCCESS;
                 break;
 
-            default: 
+            case State::SUCCESS:
+            case State::FAILURE:
+                end_of_task_ = true;
+                break;
+
+            default:
                 break;
         }
     }
 
     void call_vision_service() {
-        if (!vision_client_->wait_for_service(1s)) {
-            RCLCPP_WARN(this->get_logger(), "Vision service not available");
+        if (!vision_client_->wait_for_service(500ms)) {
+            RCLCPP_WARN(this->get_logger(), "Vision service not available, skipping point...");
             this->next_step();
             return;
         }
 
         auto req = std::make_shared<human_interfaces::srv::DetectPointing::Request>();
         
+        // Usamos async_send_request para no bloquear el timer
         vision_client_->async_send_request(req, [this](rclcpp::Client<human_interfaces::srv::DetectPointing>::SharedFuture future) {
-            auto res = future.get();
-            if (res->human_detected) {
-                RCLCPP_INFO(this->get_logger(), "Waving human detected!");
-                // Nota: Tu nodo de Python no devuelve el punto 3D en el servicio, lo publica en TF.
-                // Aquí podrías llenar final_goal con datos de TF si fuera necesario.
-                state_ = State::LOOK_AT_TARGET;
-            } else {
+            try {
+                auto res = future.get();
+                if (res->human_detected) {
+                    RCLCPP_INFO(this->get_logger(), "Human detected at pose index %zu", scan_idx_);
+                    state_ = State::LOOK_AT_TARGET;
+                } else {
+                    this->next_step();
+                }
+            } catch (const std::exception &e) {
+                RCLCPP_ERROR(this->get_logger(), "Service call failed: %s", e.what());
                 this->next_step();
             }
         });
@@ -146,6 +156,7 @@ private:
     void next_step() {
         scan_idx_++;
         if (scan_idx_ >= scan_poses_.size()) {
+            RCLCPP_INFO(this->get_logger(), "Scan complete. No detections.");
             state_ = State::FAILURE;
             return;
         }
@@ -166,16 +177,17 @@ private:
         }
     }
 
+    // --- Miembros ---
     State state_;
-    float target_pan_, target_tilt_;
+    float target_pan_ = 0.0;
+    float target_tilt_ = 0.0;
     uint8_t stabilize_count_ = 0;
-    bool end_of_task = false;
+    std::atomic<bool> end_of_task_{false}; // Atomic para seguridad entre hilos
     geometry_msgs::msg::PointStamped final_goal;
 
-    // Ajusté un poco los ángulos para buscar personas (más horizontales)
     std::vector<std::pair<float, float>> scan_poses_ = {
         { 0.0f,  -0.20f}, { -0.4f, -0.20f}, { 0.4f, -0.20f},
-        { 0.0f,  -0.40f}, { -0.4f, -0.40f}, { 0.4f, -0.40f}
+        { 0.0f,  -0.05f}, { -0.4f, -0.05f}, { 0.4f, -0.05f}
     };
 
     size_t scan_idx_ = 0;
@@ -191,6 +203,7 @@ private:
 int main(int argc, char **argv) {
     rclcpp::init(argc, argv);
     auto node = std::make_shared<WavingHumanFinderNode>();
+    // IMPORTANTE: Al menos 2 o más hilos para que el servicio no bloquee al timer
     rclcpp::executors::MultiThreadedExecutor executor(rclcpp::ExecutorOptions(), 4);
     executor.add_node(node);
     executor.spin();
