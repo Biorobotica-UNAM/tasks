@@ -139,6 +139,7 @@ private:
                 if (++failure_count_ > 10 ) {
                     failure_count_ = 0;
                     state_ = State::FAILURE;
+                    end_of_task = true;
                 }
                 break;
         }
