@@ -52,8 +52,7 @@ public:
         RCLCPP_INFO(this->get_logger(), "Waving Detector task ready. Waiting for service calls...");
     }
 
-private:
-    void handle_task_request(const std::shared_ptr<std_srvs::srv::Trigger::Request> /*request*/,
+void handle_task_request(const std::shared_ptr<std_srvs::srv::Trigger::Request> /*request*/,
                              std::shared_ptr<std_srvs::srv::Trigger::Response> response) 
     {
         if (state_ != State::IDLE) {
@@ -70,12 +69,19 @@ private:
         RCLCPP_INFO(this->get_logger(), "New task received. Starting scan...");
         state_ = State::MOVING_HEAD;
 
-        rclcpp::Rate loop_rate(20); 
-        while (!end_of_task_ && rclcpp::ok()) {
-            loop_rate.sleep();
+        // --- LÓGICA DE ESPERA CORREGIDA ---
+        int timeout_count = 0;
+        while (!end_of_task_ && rclcpp::ok() && timeout_count < 100) { 
+            std::this_thread::sleep_for(100ms); // Espera activa pero relajada
+            timeout_count++;
         }
 
-        if (state_ == State::SUCCESS) {
+        // --- RESPUESTA ÚNICA ---
+        if (timeout_count >= 100) {
+            RCLCPP_WARN(this->get_logger(), "FSM Timed out!");
+            response->success = false;
+            response->message = "Timeout: Search took too long";
+        } else if (state_ == State::SUCCESS) {
             response->success = true;
             response->message = "Human found waving!";
         } else {
