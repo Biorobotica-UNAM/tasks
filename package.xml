@@ -17,6 +17,7 @@
   <depend>faces_interfaces</depend>
   <depend>take_interfaces</depend>
   <depend>human_interfaces</depend>
+  <depend>vision_tools</depend>
   <depend>manipulation_planner_interfaces</depend>
   <depend>manipulation_controller_interfaces</depend>
   <depend>manipulation_tools</depend>
