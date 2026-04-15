@@ -20,7 +20,7 @@ public:
 
     vision_ = std::make_shared<Vision>(node_);
     pub_cmd_vel_ = node_->create_publisher<geometry_msgs::msg::Twist>(
-        "/hardware/base/cmd_vel", rclcpp::QoS(10));
+        "/hardware/base/cmd_vel", rclcpp::QoS(10).transient_local());
 
     task_service_ = node_->create_service<std_srvs::srv::Trigger>(
         "/tasks/table_align",
