@@ -38,7 +38,7 @@ public:
         head_look_at_pub_ = this->create_publisher<geometry_msgs::msg::PointStamped>("/hardware/head/look_at", 1);
         
         // --- Vision service ---
-        vision_client_ = this->create_client<vision_interfaces::srv::FindObject>("/vision/find_object", 
+        vision_client_ = this->create_client<vision_interfaces::srv::FindObject>("/vision/Owlv2Service", 
             rmw_qos_profile_services_default, cb_group_);
 
         // --- Task service ---
