@@ -95,9 +95,9 @@ private:
     {
         geometry_msgs::msg::PoseStamped pose;
         pose.header.frame_id    = "base_link";
-        pose.pose.position.x    =  0.1;
+        pose.pose.position.x    =  0.4;
 		pose.pose.position.y = (arm == "right_arm_group") ? -0.35 : 0.35;
-        pose.pose.position.z    =  0.3;
+        pose.pose.position.z    =  0.9;
         pose.pose.orientation.x =  0.0;
         pose.pose.orientation.y =  -0.707;
         pose.pose.orientation.z =  0.0;
