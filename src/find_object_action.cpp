@@ -38,7 +38,7 @@ public:
         head_look_at_pub_ = this->create_publisher<geometry_msgs::msg::PointStamped>("/hardware/head/look_at", 1);
         
         // --- Vision service ---
-        vision_client_ = this->create_client<vision_interfaces::srv::FindObject>("/vision/find_object", 
+        vision_client_ = this->create_client<vision_interfaces::srv::FindObject>("/vision/Owlv2Service", 
             rmw_qos_profile_services_default, cb_group_);
 
         // --- Task service ---
@@ -84,6 +84,10 @@ private:
         }
 
         response->success = (state_ == State::SUCCESS);
+        if (response->success) {
+            // Aquí es donde el Find.cpp recibirá el nombre real
+            response->detected_class = this->detected_object_name; 
+        }  
         response->message = response->success ? "Object found" : "No object found";
         
         state_ = State::IDLE;
@@ -135,6 +139,7 @@ private:
                 if (++failure_count_ > 10 ) {
                     failure_count_ = 0;
                     state_ = State::FAILURE;
+                    end_of_task = true;
                 }
                 break;
         }
@@ -154,6 +159,7 @@ private:
             if (res->success) {
                 RCLCPP_INFO(this->get_logger(), "Object found!");
                 final_goal = res->point;
+                this->detected_object_name = res->detected_class;
                 state_ = State::LOOK_AT_TARGET;
             } else {
                 this->next_step();
@@ -186,7 +192,7 @@ private:
         }
     }
 
-
+    std::string detected_object_name;
     State state_;
     float target_pan_ = 0.0;
     float target_tilt_ = -0.5;
