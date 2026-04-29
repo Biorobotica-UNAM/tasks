@@ -6,7 +6,7 @@
 #include "std_msgs/msg/float64_multi_array.hpp"
 #include "std_msgs/msg/bool.hpp"
 #include "geometry_msgs/msg/point_stamped.hpp"
-#include "vision_interfaces/srv/find_object.hpp"
+#include "vision_interfaces/srv/get_bbox.hpp"
 
 using namespace std::chrono_literals;
 
@@ -38,11 +38,11 @@ public:
         head_look_at_pub_ = this->create_publisher<geometry_msgs::msg::PointStamped>("/hardware/head/look_at", 1);
         
         // --- Vision service ---
-        vision_client_ = this->create_client<vision_interfaces::srv::FindObject>("/vision/Owlv2Service", 
+        vision_client_ = this->create_client<vision_interfaces::srv::GetBbox>("/vision/owl/Owlv2Service", 
             rmw_qos_profile_services_default, cb_group_);
 
         // --- Task service ---
-        task_service_ = this->create_service<vision_interfaces::srv::FindObject>("/tasks/find_object",
+        task_service_ = this->create_service<vision_interfaces::srv::GetBbox>("/tasks/find_object",
             std::bind(&ObjectFinderNode::handle_task_request, this, std::placeholders::_1, std::placeholders::_2), 
             rmw_qos_profile_services_default, cb_group_);
 
@@ -53,8 +53,8 @@ public:
     }
 
 private:
-    void handle_task_request(const std::shared_ptr<vision_interfaces::srv::FindObject::Request> request,
-                             std::shared_ptr<vision_interfaces::srv::FindObject::Response> response) 
+    void handle_task_request(const std::shared_ptr<vision_interfaces::srv::GetBbox::Request> request,
+                             std::shared_ptr<vision_interfaces::srv::GetBbox::Response> response) 
     {
         if (state_ != State::IDLE) {
             response->success = false;
@@ -150,11 +150,11 @@ private:
             state_ = State::FAILURE;
             return;
         }
-        auto req = std::make_shared<vision_interfaces::srv::FindObject::Request>();
+        auto req = std::make_shared<vision_interfaces::srv::GetBbox::Request>();
         req->class_name = target_class_;
 
         // Usamos el callback asíncrono para liberar el hilo del timer de inmediato
-        vision_client_->async_send_request(req, [this](rclcpp::Client<vision_interfaces::srv::FindObject>::SharedFuture future) {
+        vision_client_->async_send_request(req, [this](rclcpp::Client<vision_interfaces::srv::GetBbox>::SharedFuture future) {
             auto res = future.get();
             if (res->success) {
                 RCLCPP_INFO(this->get_logger(), "Object found!");
@@ -218,8 +218,8 @@ private:
     rclcpp::Publisher<std_msgs::msg::Float64MultiArray>::SharedPtr head_gp_pub_;
     rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr head_gr_sub_;
     rclcpp::Publisher<geometry_msgs::msg::PointStamped>::SharedPtr head_look_at_pub_;
-    rclcpp::Client<vision_interfaces::srv::FindObject>::SharedPtr vision_client_;
-    rclcpp::Service<vision_interfaces::srv::FindObject>::SharedPtr task_service_;
+    rclcpp::Client<vision_interfaces::srv::GetBbox>::SharedPtr vision_client_;
+    rclcpp::Service<vision_interfaces::srv::GetBbox>::SharedPtr task_service_;
 
 };
 
