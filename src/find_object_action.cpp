@@ -74,6 +74,11 @@ private:
         scan_idx_ = 0;
         target_pan_ = scan_poses_[scan_idx_].first;
         target_tilt_ = scan_poses_[scan_idx_].second;
+        
+        // Usamos un puntero compartido para la promesa para evitar Race Conditions
+        task_promise_ = std::make_shared<std::promise<void>>();
+        auto future = task_promise_->get_future();
+        
         state_ = State::MOVING_HEAD;
         
         end_of_task = false;
@@ -111,6 +116,7 @@ private:
             case State::LOOK_AT_TARGET:
                 head_look_at_pub_->publish(final_goal);
                 state_ = State::SUCCESS;
+                if(task_promise_) task_promise_->set_value(); // Notifica éxito[cite: 8]
                 break;
 
             case State::SUCCESS:
@@ -241,6 +247,7 @@ private:
 int main(int argc, char **argv) {
     rclcpp::init(argc, argv);
     auto node = std::make_shared<ObjectFinderNode>();
+    // IMPORTANTE: 4 hilos son suficientes pero aseguran que ningún bloqueo detenga el sistema[cite: 8]
     rclcpp::executors::MultiThreadedExecutor executor(rclcpp::ExecutorOptions(), 4);
     executor.add_node(node);
     executor.spin();
