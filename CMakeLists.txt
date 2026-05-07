@@ -20,6 +20,7 @@ find_package(manipulation_tools REQUIRED)
 find_package(human_interfaces REQUIRED)
 find_package(tf2_ros REQUIRED)
 find_package(tf2_geometry_msgs REQUIRED)
+find_package(tf2 REQUIRED)
 find_package(vision_tools REQUIRED)
 
 add_executable(find_seat_action src/find_seat_action.cpp)
@@ -37,7 +38,7 @@ ament_target_dependencies(find_seat_action
  rclcpp std_srvs std_msgs vision_interfaces faces_interfaces)
 
 ament_target_dependencies(find_object_action
- rclcpp std_srvs std_msgs vision_interfaces geometry_msgs)
+ rclcpp std_srvs std_msgs vision_interfaces geometry_msgs tf2 tf2_ros tf2_geometry_msgs)
 
 ament_target_dependencies(take_node
  rclcpp std_srvs std_msgs geometry_msgs take_interfaces manipulation_planner_interfaces manipulation_controller_interfaces manipulation_tools)
