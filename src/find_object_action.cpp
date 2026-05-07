@@ -2,18 +2,18 @@
 #include <memory>
 #include <vector>
 #include <string>
-#include <future>
-#include <algorithm>
 
 #include "rclcpp/rclcpp.hpp"
 #include "std_srvs/srv/trigger.hpp"
 #include "std_msgs/msg/float64_multi_array.hpp"
 #include "std_msgs/msg/bool.hpp"
+#include <algorithm>
 #include "geometry_msgs/msg/point_stamped.hpp"
 #include "vision_interfaces/srv/find_object.hpp"
 #include "vision_interfaces/srv/get_detections.hpp"
+
 #include "tf2_ros/transform_listener.hpp"
-#include "tf2_ros/buffer.hpp"
+#include "tf2_ros/buffer.h"
 #include "tf2_geometry_msgs/tf2_geometry_msgs.hpp" 
 
 using namespace std::chrono_literals;
@@ -33,14 +33,15 @@ enum class State {
 class ObjectFinderNode : public rclcpp::Node {
 public:
     ObjectFinderNode() : Node("object_finder_fsm") {
-        // Callback group Reentrant para permitir ejecución paralela de timer y servicios
         cb_group_ = this->create_callback_group(rclcpp::CallbackGroupType::Reentrant);
         auto sub_options = rclcpp::SubscriptionOptions();
         sub_options.callback_group = cb_group_;
   
+        // Inicialización de TF2
         tf_buffer_ = std::make_shared<tf2_ros::Buffer>(this->get_clock());
         tf_listener_ = std::make_shared<tf2_ros::TransformListener>(*tf_buffer_);
 
+        // Publishers y Subscribers
         head_gp_pub_ = this->create_publisher<std_msgs::msg::Float64MultiArray>("/hardware/head/goal_pose", 1);
         head_gr_sub_ = this->create_subscription<std_msgs::msg::Bool>(
             "/hardware/head/goal_reached", 1,
@@ -56,7 +57,7 @@ public:
 
         state_ = State::IDLE;
         timer_ = this->create_wall_timer(300ms, std::bind(&ObjectFinderNode::control_loop, this), cb_group_);
-        RCLCPP_INFO(this->get_logger(), "Find object action Ready con soporte base_link.");
+        RCLCPP_INFO(this->get_logger(), "Find object action Ready with TF2 Support.");
     }
 
 private:
@@ -79,28 +80,21 @@ private:
         auto future = task_promise_->get_future();
         
         state_ = State::MOVING_HEAD;
-        RCLCPP_INFO(this->get_logger(), "Iniciando búsqueda de: %s", target_class_.c_str());
         
-        // Espera bloqueante del hilo del servicio (pero no del nodo)[cite: 8]
-        if (future.wait_for(40s) == std::future_status::timeout) {
-            RCLCPP_ERROR(this->get_logger(), "Timeout global de búsqueda excedido.");
-            state_ = State::IDLE;
-            response->success = false;
-            response->message = "Timeout";
-            return;
+        end_of_task = false;
+        rclcpp::Rate loop_rate(10); 
+        while (!end_of_task && rclcpp::ok()) {
+            loop_rate.sleep();
         }
 
         response->success = (state_ == State::SUCCESS);
         response->detected_class = this->detected_object_name; 
-        response->point = this->final_goal; 
-        response->message = response->success ? "Object found" : "Object not found after scan";
+        response->message = response->success ? "Object found and referenced to base_link" : "Object not found";
         
         state_ = State::IDLE;
     }
 
     void control_loop() {
-        if (state_ == State::IDLE) return;
-
         switch (state_) {
             case State::MOVING_HEAD:
                 publish_head_goal(target_pan_, target_tilt_);
@@ -108,7 +102,7 @@ private:
                 break;
 
             case State::STABILIZING:
-                if (++stabilize_count_ > 3) { 
+                if (++stabilize_count_ > 3) { // Un poco más de tiempo para que la imagen no salga movida
                     stabilize_count_ = 0;
                     state_ = State::CALLING_DETECTION;
                 }
@@ -125,8 +119,9 @@ private:
                 if(task_promise_) task_promise_->set_value(); // Notifica éxito[cite: 8]
                 break;
 
+            case State::SUCCESS:
             case State::FAILURE:
-                if(task_promise_) task_promise_->set_value(); // Notifica fallo[cite: 8]
+                end_of_task = true;
                 break;
 
             default: break;
@@ -147,35 +142,50 @@ private:
             auto res = future.get();
             if (res->success && !res->detections.empty()) {
                 
-                std::string target_frame = "OWL_" + target_class_;
-                std::replace(target_frame.begin(), target_frame.end(), ' ', '_');
-
+                std::string clean_name = target_class_;
+                std::replace(clean_name.begin(), clean_name.end(), ' ', '_');
+                std::string target_frame = "OWL_" + clean_name;
                 try {
-                    // Verificamos TF con un tiempo de espera prudente[cite: 3]
-                    if (!tf_buffer_->canTransform("base_link", target_frame, tf2::TimePointZero, 800ms)) {
-                         RCLCPP_WARN(this->get_logger(), "TF %s no disponible aún, reintentando...", target_frame.c_str());
-                         this->next_step();
-                         return;
-                    }
 
-                    auto tf_stamped = tf_buffer_->lookupTransform("base_link", target_frame, tf2::TimePointZero);
+                    auto tf_stamped = tf_buffer_->lookupTransform(
+                        "base_link", 
+                        target_frame, 
+                        tf2::TimePointZero, 
+                        500ms);
+                    double x = tf_stamped.transform.translation.x;
+                    double y = tf_stamped.transform.translation.y;
+                    double z = tf_stamped.transform.translation.z;
+
+                    tf2::Quaternion q(
+                        tf_stamped.transform.rotation.x,
+                        tf_stamped.transform.rotation.y,
+                        tf_stamped.transform.rotation.z,
+                        tf_stamped.transform.rotation.w
+                    );
+                    double roll, pitch, yaw;
+                    tf2::Matrix3x3(q).getRPY(roll, pitch, yaw);
+
+                    double r_deg = roll * 57.2958;
+                    double p_deg = pitch * 57.2958;
+                    double y_deg = yaw * 57.2958;
 
                     final_goal.header.frame_id = "base_link";
                     final_goal.header.stamp = this->now();
-                    final_goal.point.x = tf_stamped.transform.translation.x;
-                    final_goal.point.y = tf_stamped.transform.translation.y;
-                    final_goal.point.z = tf_stamped.transform.translation.z;
+                    final_goal.point.x = x;
+                    final_goal.point.y = y;
+                    final_goal.point.z = z;
+                    
 
-                    // Ajuste de altura mínima para evitar que el cuello choque
-                    if (final_goal.point.z < 0.2) final_goal.point.z = 0.5; 
+                    // ajustado para que el look_at sea natural
+                    if (final_goal.point.z < 0.1) final_goal.point.z = 0.5; 
 
                     this->detected_object_name = res->detections[0].class_name;
                     state_ = State::LOOK_AT_TARGET;
-                    RCLCPP_INFO(this->get_logger(), "¡Encontrado! [%.2f, %.2f, %.2f]", 
+                    RCLCPP_INFO(this->get_logger(), "Success! Target in base_link: [%.2f, %.2f, %.2f]", 
                                 final_goal.point.x, final_goal.point.y, final_goal.point.z);
 
                 } catch (tf2::TransformException &ex) {
-                    RCLCPP_WARN(this->get_logger(), "Excepción TF2: %s", ex.what());
+                    RCLCPP_WARN(this->get_logger(), "TF2 Error: %s. Retrying next pose...", ex.what());
                     this->next_step();
                 }
             } else {
@@ -207,14 +217,14 @@ private:
         }
     }
 
-    // Miembros
+    // Miembros de la clase
     std::shared_ptr<tf2_ros::Buffer> tf_buffer_;
     std::shared_ptr<tf2_ros::TransformListener> tf_listener_;
     
     std::string detected_object_name;
     State state_;
     float target_pan_, target_tilt_;
-    std::shared_ptr<std::promise<void>> task_promise_; // Uso de puntero para mayor seguridad[cite: 8]
+    bool end_of_task = false;
     uint8_t stabilize_count_ = 0;
     geometry_msgs::msg::PointStamped final_goal;
     std::string target_class_;
