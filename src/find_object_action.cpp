@@ -156,13 +156,13 @@ private:
                     auto tf_time = rclcpp::Time(tf_stamped.header.stamp);
                     double diff = (now_time.seconds() - tf_time.seconds());
                     // LOG de depuración para que veas qué está pasando
-                    //RCLCPP_INFO(this->get_logger(), "Validando TF: Now=%.2f, TF=%.2f, Diff=%.4f", 
-                               //now_time.seconds(), tf_time.seconds(), diff);
+                    RCLCPP_INFO(this->get_logger(), "Validando TF: Now=%.2f, TF=%.2f, Diff=%.4f", 
+                               now_time.seconds(), tf_time.seconds(), diff);
 
-                    //if (std::abs(diff) > 2.0) { 
-                       //RCLCPP_WARN(this->get_logger(), "TF obsoleta. Edad real: %.4f s", diff);
-                        //this->next_step();
-                        //return;
+                    if (std::abs(diff) > 2.0) { 
+                       RCLCPP_WARN(this->get_logger(), "TF obsoleta. Edad real: %.4f s", diff);
+                        this->next_step();
+                        return;
                     }
                     //final_goal.header.frame_id = "base_link";
                     //final_goal.header.stamp = this->now();
