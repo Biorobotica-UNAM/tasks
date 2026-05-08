@@ -152,20 +152,36 @@ private:
                 try {
                     auto tf_stamped = tf_buffer_->lookupTransform("base_link", target_frame, tf2::TimePointZero, 500ms);
                     
-                    final_goal.header.frame_id = "base_link";
-                    final_goal.header.stamp = this->now();
+                    auto now_time = this->get_clock()->now();
+                    auto tf_time = rclcpp::Time(tf_stamped.header.stamp);
+                    double diff = (now_time.seconds() - tf_time.seconds());
+                    // LOG de depuración para que veas qué está pasando
+                    //RCLCPP_INFO(this->get_logger(), "Validando TF: Now=%.2f, TF=%.2f, Diff=%.4f", 
+                               //now_time.seconds(), tf_time.seconds(), diff);
+
+                    //if (std::abs(diff) > 2.0) { 
+                       //RCLCPP_WARN(this->get_logger(), "TF obsoleta. Edad real: %.4f s", diff);
+                        //this->next_step();
+                        //return;
+                    }
+                    //final_goal.header.frame_id = "base_link";
+                    //final_goal.header.stamp = this->now();
                     final_goal.pose.position.x = tf_stamped.transform.translation.x;
                     final_goal.pose.position.y = tf_stamped.transform.translation.y;
                     final_goal.pose.position.z = tf_stamped.transform.translation.z;
 
                     final_goal.pose.orientation = tf_stamped.transform.rotation;
 
+                    final_goal.header.frame_id = "base_link"; // Aseguramos que MoveIt sepa el origen
+                    final_goal.header.stamp.sec = 0;          // Tiempo 0 para evitar errores de extrapolación
+                    final_goal.header.stamp.nanosec = 0;
+
                     // Ajuste para el look_at (accediendo correctamente a position.z)
                     if (final_goal.pose.position.z < 0.1) final_goal.pose.position.z = 0.5; 
 
                     this->detected_object_name = res->detections[0].class_name;
                     state_ = State::LOOK_AT_TARGET;
-                    RCLCPP_INFO(this->get_logger(), "Success! Target in base_link: [%.2f, %.2f, %.2f]", 
+                    RCLCPP_INFO(this->get_logger(), "Success Target in base_link: [%.2f, %.2f, %.2f]", 
                                 final_goal.pose.position.x, final_goal.pose.position.y, final_goal.pose.position.z);
 
                 } catch (tf2::TransformException &ex) {
