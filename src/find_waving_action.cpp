@@ -192,7 +192,7 @@ void handle_task_request(const std::shared_ptr<std_srvs::srv::Trigger::Request> 
     geometry_msgs::msg::PointStamped final_goal;
 
     std::vector<std::pair<float, float>> scan_poses_ = {
-        { 0.0f,  -0.20f}, { -0.4f, -0.20f}, { 0.4f, -0.20f},
+        { 0.0f,  0.20f}, { -0.4f, 0.20f}, { 0.4f, 0.20f},
         { 0.0f,  -0.05f}, { -0.4f, -0.05f}, { 0.4f, -0.05f}
     };
 
