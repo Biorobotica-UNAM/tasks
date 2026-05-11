@@ -1,12 +1,14 @@
 #include <chrono>
 #include <memory>
 #include <vector>
+#include <atomic>
 #include "rclcpp/rclcpp.hpp"
 #include "std_srvs/srv/trigger.hpp"
 #include "std_msgs/msg/float64_multi_array.hpp"
 #include "std_msgs/msg/bool.hpp"
 #include "geometry_msgs/msg/point_stamped.hpp"
 #include "human_interfaces/srv/detect_pointing.hpp" 
+#include "torso_interfaces/srv/move_torso.hpp"
 
 using namespace std::chrono_literals;
 
@@ -17,6 +19,8 @@ enum class State {
     STABILIZING,
     CALLING_DETECTION,
     WAITING_SERVICE,
+    MOVING_TORSO,
+    WAITING_TORSO,
     LOOK_AT_TARGET,
     SUCCESS, 
     FAILURE
@@ -37,8 +41,8 @@ public:
         
         head_look_at_pub_ = this->create_publisher<geometry_msgs::msg::PointStamped>("/hardware/head/look_at", 1);
         
-        vision_client_ = this->create_client<human_interfaces::srv::DetectPointing>(
-            "/human_detection/detect_wrist", rmw_qos_profile_services_default, cb_group_);
+        vision_client_ = this->create_client<human_interfaces::srv::DetectPointing>("/human_detection/detect_wrist", rmw_qos_profile_services_default, cb_group_);
+        torso_client_ = this->create_client<torso_interfaces::srv::MoveTorso>("/hardware/torso/move_torso", rmw_qos_profile_services_default, cb_group_);
 
         task_service_ = this->create_service<std_srvs::srv::Trigger>(
             "/tasks/find_waving_human",
@@ -46,13 +50,12 @@ public:
             rmw_qos_profile_services_default, cb_group_);
 
         state_ = State::IDLE;
-        // Timer para la lógica de la FSM
         timer_ = this->create_wall_timer(100ms, std::bind(&WavingHumanFinderNode::control_loop, this), cb_group_);
         
-        RCLCPP_INFO(this->get_logger(), "Waving Detector task ready. Waiting for service calls...");
+        RCLCPP_INFO(this->get_logger(), "Waving Detector ready.");
     }
 
-void handle_task_request(const std::shared_ptr<std_srvs::srv::Trigger::Request> /*request*/,
+    void handle_task_request(const std::shared_ptr<std_srvs::srv::Trigger::Request> /*request*/,
                              std::shared_ptr<std_srvs::srv::Trigger::Response> response) 
     {
         if (state_ != State::IDLE) {
@@ -66,19 +69,15 @@ void handle_task_request(const std::shared_ptr<std_srvs::srv::Trigger::Request> 
         target_pan_ = scan_poses_[scan_idx_].first;
         target_tilt_ = scan_poses_[scan_idx_].second;
         
-        RCLCPP_INFO(this->get_logger(), "New task received. Starting scan...");
         state_ = State::MOVING_HEAD;
 
-        // --- LÓGICA DE ESPERA CORREGIDA ---
         int timeout_count = 0;
-        while (!end_of_task_ && rclcpp::ok() && timeout_count < 100) { 
-            std::this_thread::sleep_for(100ms); // Espera activa pero relajada
+        while (!end_of_task_ && rclcpp::ok() && timeout_count < 300) { // 30 segundos de timeout total
+            std::this_thread::sleep_for(100ms);
             timeout_count++;
         }
 
-        // --- RESPUESTA ÚNICA ---
-        if (timeout_count >= 100) {
-            RCLCPP_WARN(this->get_logger(), "FSM Timed out!");
+        if (timeout_count >= 300) {
             response->success = false;
             response->message = "Timeout: Search took too long";
         } else if (state_ == State::SUCCESS) {
@@ -86,15 +85,14 @@ void handle_task_request(const std::shared_ptr<std_srvs::srv::Trigger::Request> 
             response->message = "Human found waving!";
         } else {
             response->success = false;
-            response->message = "Search finished: Human not found.";
+            response->message = "Human not found.";
         }
 
         state_ = State::IDLE;
-        RCLCPP_INFO(this->get_logger(), "DETECTION COMPLETE: %s", response->message.c_str());
+        end_of_task_ = true; 
     }
 
     void control_loop() {
-        // Solo actuar si no estamos en IDLE
         if (state_ == State::IDLE) return;
 
         switch (state_) {
@@ -118,6 +116,15 @@ void handle_task_request(const std::shared_ptr<std_srvs::srv::Trigger::Request> 
                 state_ = State::WAITING_SERVICE;
                 break;
 
+            case State::MOVING_TORSO:
+                call_torso_service(0.40);
+                state_ = State::WAITING_TORSO;
+                break;
+
+            case State::WAITING_TORSO:
+            case State::WAITING_SERVICE:
+                break;
+
             case State::LOOK_AT_TARGET:
                 head_look_at_pub_->publish(final_goal);
                 state_ = State::SUCCESS;
@@ -133,27 +140,29 @@ void handle_task_request(const std::shared_ptr<std_srvs::srv::Trigger::Request> 
         }
     }
 
+    void call_torso_service(float height) {
+        if (!torso_client_->wait_for_service(500ms)) {
+            state_ = State::MOVING_HEAD;
+            return;
+        }
+        auto req = std::make_shared<torso_interfaces::srv::MoveTorso::Request>();
+        req->height = height; 
+        torso_client_->async_send_request(req, [this](rclcpp::Client<torso_interfaces::srv::MoveTorso>::SharedFuture future) {
+            state_ = State::MOVING_HEAD;
+        });
+    }
+
     void call_vision_service() {
         if (!vision_client_->wait_for_service(500ms)) {
-            RCLCPP_WARN(this->get_logger(), "Vision service not available, skipping point...");
             this->next_step();
             return;
         }
-
         auto req = std::make_shared<human_interfaces::srv::DetectPointing::Request>();
-        
-        // Usamos async_send_request para no bloquear el timer
         vision_client_->async_send_request(req, [this](rclcpp::Client<human_interfaces::srv::DetectPointing>::SharedFuture future) {
-            try {
-                auto res = future.get();
-                if (res->human_detected) {
-                    RCLCPP_INFO(this->get_logger(), "Human detected at pose index %zu", scan_idx_);
-                    state_ = State::LOOK_AT_TARGET;
-                } else {
-                    this->next_step();
-                }
-            } catch (const std::exception &e) {
-                RCLCPP_ERROR(this->get_logger(), "Service call failed: %s", e.what());
+            auto res = future.get();
+            if (res->human_detected) {
+                state_ = State::LOOK_AT_TARGET;
+            } else {
                 this->next_step();
             }
         });
@@ -162,13 +171,17 @@ void handle_task_request(const std::shared_ptr<std_srvs::srv::Trigger::Request> 
     void next_step() {
         scan_idx_++;
         if (scan_idx_ >= scan_poses_.size()) {
-            RCLCPP_INFO(this->get_logger(), "Scan complete. No detections.");
             state_ = State::FAILURE;
             return;
         }
         target_pan_ = scan_poses_[scan_idx_].first;
         target_tilt_ = scan_poses_[scan_idx_].second;
-        state_ = State::MOVING_HEAD;
+
+        if (scan_idx_ == 3) {
+            state_ = State::MOVING_TORSO;
+        } else {
+            state_ = State::MOVING_HEAD;
+        }
     }
 
     void publish_head_goal(double pan_val, double tilt_val) {
@@ -183,17 +196,16 @@ void handle_task_request(const std::shared_ptr<std_srvs::srv::Trigger::Request> 
         }
     }
 
-    // --- Miembros ---
     State state_;
     float target_pan_ = 0.0;
     float target_tilt_ = 0.0;
     uint8_t stabilize_count_ = 0;
-    std::atomic<bool> end_of_task_{false}; // Atomic para seguridad entre hilos
+    std::atomic<bool> end_of_task_{false};
     geometry_msgs::msg::PointStamped final_goal;
 
     std::vector<std::pair<float, float>> scan_poses_ = {
-        { 0.0f,  -0.20f}, { -0.4f, -0.20f}, { 0.4f, -0.20f},
-        { 0.0f,  -0.05f}, { -0.4f, -0.05f}, { 0.4f, -0.05f}
+        { 0.0f, -0.20f}, {-0.4f, -0.20f}, { 0.4f, -0.20f},
+        { 0.0f, -0.05f}, {-0.4f, -0.05f}, { 0.4f, -0.05f}
     };
 
     size_t scan_idx_ = 0;
@@ -203,13 +215,13 @@ void handle_task_request(const std::shared_ptr<std_srvs::srv::Trigger::Request> 
     rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr head_gr_sub_;
     rclcpp::Publisher<geometry_msgs::msg::PointStamped>::SharedPtr head_look_at_pub_;
     rclcpp::Client<human_interfaces::srv::DetectPointing>::SharedPtr vision_client_;
+    rclcpp::Client<torso_interfaces::srv::MoveTorso>::SharedPtr torso_client_;
     rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr task_service_;
 };
 
 int main(int argc, char **argv) {
     rclcpp::init(argc, argv);
     auto node = std::make_shared<WavingHumanFinderNode>();
-    // IMPORTANTE: Al menos 2 o más hilos para que el servicio no bloquee al timer
     rclcpp::executors::MultiThreadedExecutor executor(rclcpp::ExecutorOptions(), 4);
     executor.add_node(node);
     executor.spin();
