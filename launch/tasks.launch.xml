@@ -1,0 +1,58 @@
+<?xml version="1.0"?>
+<launch>
+
+  <group>
+    <push-ros-namespace namespace="tasks"/>
+
+      <node
+        pkg="tasks"
+        exec="find_seat_node"
+        name="find_seat_node"
+        output="screen">
+      </node>
+
+      <node
+        pkg="tasks"
+        exec="find_person_node"
+        name="find_person_node"
+        output="screen">
+      </node>
+
+      <node
+        pkg="tasks"
+        exec="find_object_node"
+        name="find_object_node"
+        output="screen">
+      </node>
+
+      <node
+        pkg="tasks"
+        exec="find_waving_node"
+        name="find_waving_node"
+        output="screen">
+      </node>
+
+      <node
+        pkg="tasks"
+        exec="human_follower_node"
+        name="human_follower_node"
+        output="screen">
+      </node>
+
+      <node
+        pkg="tasks"
+        exec="table_align_node"
+        name="table_align_node"
+        output="screen">
+      </node>
+
+      <node
+        pkg="tasks"
+        exec="take_node"
+        name="take_node"
+        output="screen">
+      </node>
+
+  </group>
+
+</launch>

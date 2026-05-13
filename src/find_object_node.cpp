@@ -2,13 +2,14 @@
 #include <memory>
 #include <vector>
 #include <string>
+#include <future>
 
 #include "rclcpp/rclcpp.hpp"
 #include "std_srvs/srv/trigger.hpp"
 #include "std_msgs/msg/float64_multi_array.hpp"
 #include "std_msgs/msg/bool.hpp"
 #include <algorithm>
-#include "geometry_msgs/msg/point_stamped.hpp"
+#include "geometry_msgs/msg/pose_stamped.hpp"
 #include "vision_interfaces/srv/find_object.hpp"
 #include "vision_interfaces/srv/get_detections.hpp"
 
@@ -37,16 +38,14 @@ public:
         auto sub_options = rclcpp::SubscriptionOptions();
         sub_options.callback_group = cb_group_;
   
-        // Inicialización de TF2
         tf_buffer_ = std::make_shared<tf2_ros::Buffer>(this->get_clock());
         tf_listener_ = std::make_shared<tf2_ros::TransformListener>(*tf_buffer_);
 
-        // Publishers y Subscribers
         head_gp_pub_ = this->create_publisher<std_msgs::msg::Float64MultiArray>("/hardware/head/goal_pose", 1);
         head_gr_sub_ = this->create_subscription<std_msgs::msg::Bool>(
             "/hardware/head/goal_reached", 1,
             std::bind(&ObjectFinderNode::head_gr_cb, this, std::placeholders::_1), sub_options);
-        head_look_at_pub_ = this->create_publisher<geometry_msgs::msg::PointStamped>("/hardware/head/look_at", 1);
+        head_look_at_pub_ = this->create_publisher<geometry_msgs::msg::PoseStamped>("/hardware/head/look_at", 1);
         
         vision_client_ = this->create_client<vision_interfaces::srv::GetDetections>("/vision/owl/owlv2_service", 
             rmw_qos_profile_services_default, cb_group_);
@@ -74,6 +73,10 @@ private:
         scan_idx_ = 0;
         target_pan_ = scan_poses_[scan_idx_].first;
         target_tilt_ = scan_poses_[scan_idx_].second;
+        
+        task_promise_ = std::make_shared<std::promise<void>>();
+        auto future = task_promise_->get_future();
+        
         state_ = State::MOVING_HEAD;
         
         end_of_task = false;
@@ -84,7 +87,13 @@ private:
 
         response->success = (state_ == State::SUCCESS);
         response->detected_class = this->detected_object_name; 
-        response->message = response->success ? "Object found and referenced to base_link" : "Object not found";
+        
+        if (response->success) {
+            response->pose = this->final_goal; 
+            response->message = "Object found and referenced to base_link";
+        } else {
+            response->message = "Object not found";
+        }
         
         state_ = State::IDLE;
     }
@@ -97,7 +106,7 @@ private:
                 break;
 
             case State::STABILIZING:
-                if (++stabilize_count_ > 3) { // Un poco más de tiempo para que la imagen no salga movida
+                if (++stabilize_count_ > 3) {
                     stabilize_count_ = 0;
                     state_ = State::CALLING_DETECTION;
                 }
@@ -111,6 +120,7 @@ private:
             case State::LOOK_AT_TARGET:
                 head_look_at_pub_->publish(final_goal);
                 state_ = State::SUCCESS;
+                if(task_promise_) task_promise_->set_value(); 
                 break;
 
             case State::SUCCESS:
@@ -140,43 +150,39 @@ private:
                 std::replace(clean_name.begin(), clean_name.end(), ' ', '_');
                 std::string target_frame = "OWL_" + clean_name;
                 try {
-
-                    auto tf_stamped = tf_buffer_->lookupTransform(
-                        "base_link", 
-                        target_frame, 
-                        tf2::TimePointZero, 
-                        500ms);
-                    double x = tf_stamped.transform.translation.x;
-                    double y = tf_stamped.transform.translation.y;
-                    double z = tf_stamped.transform.translation.z;
-
-                    tf2::Quaternion q(
-                        tf_stamped.transform.rotation.x,
-                        tf_stamped.transform.rotation.y,
-                        tf_stamped.transform.rotation.z,
-                        tf_stamped.transform.rotation.w
-                    );
-                    double roll, pitch, yaw;
-                    tf2::Matrix3x3(q).getRPY(roll, pitch, yaw);
-
-                    double r_deg = roll * 57.2958;
-                    double p_deg = pitch * 57.2958;
-                    double y_deg = yaw * 57.2958;
-
-                    final_goal.header.frame_id = "base_link";
-                    final_goal.header.stamp = this->now();
-                    final_goal.point.x = x;
-                    final_goal.point.y = y;
-                    final_goal.point.z = z;
+                    auto tf_stamped = tf_buffer_->lookupTransform("base_link", target_frame, tf2::TimePointZero, 500ms);
                     
+                    auto now_time = this->get_clock()->now();
+                    auto tf_time = rclcpp::Time(tf_stamped.header.stamp);
+                    double diff = (now_time.seconds() - tf_time.seconds());
+                    // LOG de depuración para que veas qué está pasando
+                    RCLCPP_INFO(this->get_logger(), "Validando TF: Now=%.2f, TF=%.2f, Diff=%.4f", 
+                               now_time.seconds(), tf_time.seconds(), diff);
 
-                    // ajustado para que el look_at sea natural
-                    if (final_goal.point.z < 0.1) final_goal.point.z = 0.5; 
+                    if (std::abs(diff) > 2.0) { 
+                       RCLCPP_WARN(this->get_logger(), "TF obsoleta. Edad real: %.4f s", diff);
+                        this->next_step();
+                        return;
+                    }
+                    //final_goal.header.frame_id = "base_link";
+                    //final_goal.header.stamp = this->now();
+                    final_goal.pose.position.x = tf_stamped.transform.translation.x;
+                    final_goal.pose.position.y = tf_stamped.transform.translation.y;
+                    final_goal.pose.position.z = tf_stamped.transform.translation.z;
+
+                    final_goal.pose.orientation = tf_stamped.transform.rotation;
+
+                    final_goal.header.frame_id = "base_link"; // Aseguramos que MoveIt sepa el origen
+                    final_goal.header.stamp.sec = 0;          // Tiempo 0 para evitar errores de extrapolación
+                    final_goal.header.stamp.nanosec = 0;
+
+                    // Ajuste para el look_at (accediendo correctamente a position.z)
+                    if (final_goal.pose.position.z < 0.1) final_goal.pose.position.z = 0.5; 
 
                     this->detected_object_name = res->detections[0].class_name;
                     state_ = State::LOOK_AT_TARGET;
-                    RCLCPP_INFO(this->get_logger(), "Success! Target in base_link: [%.2f, %.2f, %.2f]", 
-                                final_goal.point.x, final_goal.point.y, final_goal.point.z);
+                    RCLCPP_INFO(this->get_logger(), "Success Target in base_link: [%.2f, %.2f, %.2f]", 
+                                final_goal.pose.position.x, final_goal.pose.position.y, final_goal.pose.position.z);
 
                 } catch (tf2::TransformException &ex) {
                     RCLCPP_WARN(this->get_logger(), "TF2 Error: %s. Retrying next pose...", ex.what());
@@ -192,6 +198,7 @@ private:
         scan_idx_++;
         if (scan_idx_ >= scan_poses_.size()) {
             state_ = State::FAILURE;
+            if(task_promise_) task_promise_->set_value(); 
         } else {
             target_pan_ = scan_poses_[scan_idx_].first;
             target_tilt_ = scan_poses_[scan_idx_].second;
@@ -220,8 +227,11 @@ private:
     float target_pan_, target_tilt_;
     bool end_of_task = false;
     uint8_t stabilize_count_ = 0;
-    geometry_msgs::msg::PointStamped final_goal;
+    geometry_msgs::msg::PoseStamped final_goal;
     std::string target_class_;
+    
+    // VARIABLES DECLARADAS PARA SOLUCIONAR ERRORES
+    std::shared_ptr<std::promise<void>> task_promise_; 
 
     std::vector<std::pair<float, float>> scan_poses_ = {
         { 0.0f,  -0.35f}, {-0.35f, -0.45f}, { 0.35f, -0.45f},
@@ -233,7 +243,7 @@ private:
     rclcpp::TimerBase::SharedPtr timer_;
     rclcpp::Publisher<std_msgs::msg::Float64MultiArray>::SharedPtr head_gp_pub_;
     rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr head_gr_sub_;
-    rclcpp::Publisher<geometry_msgs::msg::PointStamped>::SharedPtr head_look_at_pub_;
+    rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr head_look_at_pub_;
     rclcpp::Client<vision_interfaces::srv::GetDetections>::SharedPtr vision_client_;
     rclcpp::Service<vision_interfaces::srv::FindObject>::SharedPtr task_service_;
 };

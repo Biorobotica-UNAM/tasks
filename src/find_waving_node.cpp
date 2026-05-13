@@ -10,9 +10,9 @@
 #include "human_interfaces/srv/detect_pointing.hpp" 
 #include "torso_interfaces/srv/move_torso.hpp"
 
-using namespace std::chrono_literals;
+// STABLE VERSION
 
-//version estable
+using namespace std::chrono_literals;
 
 enum class State {
     IDLE,
