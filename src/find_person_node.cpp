@@ -19,8 +19,10 @@ enum class State {
     MOVING_HEAD,
     WAITING_HEAD,
     STABILIZING,
-    CALLING_DETECTION,
-    CALLING_IDENTIFY,
+    CALLING_DETECTION, // busca si hay alguien
+    CALLING_IDENTIFY,  // intenta buscar si esta en su base de datos 
+    CALLING_REGISTER, // si no esta en la base, guarda el rostro
+    CALLING_DESCRIBE, // genera una descripcion de la pesona 
     WAITING_SERVICE,
     CALLING_BBOX_TO_POSE_SERVICE, 
     LOOK_AT_TARGET,
@@ -46,6 +48,8 @@ public:
         // --- Vision services ---
         detect_client_ = this->create_client<faces_interfaces::srv::FaceRecog>("/vision/detect_person", rmw_qos_profile_services_default, cb_group_);
         identify_client_ = this->create_client<faces_interfaces::srv::FaceRecog>("/vision/identify_person", rmw_qos_profile_services_default, cb_group_);
+        register_client_ = this->create_client<faces_interfaces::srv::FaceRecog>("/vision/register_person", rmw_qos_profile_services_default, cb_group_);
+        describe_client_ = this->create_client<faces_interfaces::srv::FaceRecog>("/vision/describe_person", rmw_qos_profile_services_default, cb_group_);
         bbox2pose_client_ = this->create_client<vision_interfaces::srv::BboxToPose>("/vision/bbox_to_pose", rmw_qos_profile_services_default, cb_group_);
 
         // --- Task service ---
@@ -57,6 +61,7 @@ public:
         // --- Control loop timer ---
         state_ = State::IDLE;
         timer_ = this->create_wall_timer(300ms, std::bind(&PersonFinderNode::control_loop, this), cb_group_);
+        
         RCLCPP_INFO(this->get_logger(), "Find person action Ready.");
     }
 
@@ -71,15 +76,15 @@ private:
 
         if (target_is_specified_) {
             // MODO PANEO: De izquierda (-1.57) a derecha (1.57) -> Incrementamos
-            scan_start_ = -1.57;
-            scan_end_ = 1.57;
+            scan_start_ = -1.2;
+            scan_end_ = 1.2;
             scan_step_ = 0.4; 
             RCLCPP_INFO(this->get_logger(), "Modo PANEO (Horizonte)");
         } else {
             // MODO TILTEO: De arriba (1.0) a abajo (-0.5) -> Decrementamos
-            scan_start_ = 0.47;
-            scan_end_ =  0.0;
-            scan_step_ = -0.1;
+            scan_start_ = 0.45;
+            scan_end_ =  -0.2;
+            scan_step_ = -0.15;
             RCLCPP_INFO(this->get_logger(), "Modo TILTEO (Vertical)");
         }
 
@@ -94,7 +99,6 @@ private:
         }
 
         res->success = (state_ == State::SUCCESS);
-
         state_ = State::IDLE;
         RCLCPP_INFO(this->get_logger(), "Task completed, response sent");
     }
@@ -103,10 +107,6 @@ private:
         if (state_ == State::IDLE || state_ == State::WAITING_SERVICE) return;
 
         switch (state_) {
-            case State::IDLE:
-                failure_count_ = 0;
-                break;
-
             case State::SUCCESS:
             case State::FAILURE:
                 end_of_task = true;
@@ -120,40 +120,43 @@ private:
                 break;
 
             case State::STABILIZING:
-                if (++stabilize_count_ > 2) {
+                if (++stabilize_count_ > 3) {
                     stabilize_count_ = 0;
                     state_ = State::CALLING_DETECTION;
                 }
                 break;
 
             case State::CALLING_DETECTION:
-                RCLCPP_INFO(this->get_logger(), "Detection service called");
+                RCLCPP_INFO(this->get_logger(), "Detection/Identify service called");
                 call_vision_service();
                 state_ = State::WAITING_SERVICE;
-                failure_count_ = 0;
+                break;
+
+            case State::CALLING_REGISTER:
+                RCLCPP_INFO(this->get_logger(), "Registering new person...");
+                call_register_service();
+                state_ = State::WAITING_SERVICE;
                 break;
 
             case State::CALLING_BBOX_TO_POSE_SERVICE:
                 RCLCPP_INFO(this->get_logger(), "Calling BBox to Pose service...");
                 call_bbox_to_pose_service();
-                state_ = State::WAITING_SERVICE; // Reutilizamos el bloqueo de espera
+                state_ = State::WAITING_SERVICE;
                 break;
 
             case State::LOOK_AT_TARGET:
-                final_goal.header.stamp.sec = 0;
-                final_goal.header.stamp.nanosec = 0;
+                final_goal.header.stamp = this->now();
                 head_look_at_pub_->publish(final_goal);
-                failure_count_ = 0;
-                state_ = State::SUCCESS;
-            break;
+                state_ = State::CALLING_DESCRIBE; // Después de mirar, describimos
+                break;
+
+            case State::CALLING_DESCRIBE:
+                RCLCPP_INFO(this->get_logger(), "Generating Florence-2 report...");
+                call_describe_service();
+                state_ = State::WAITING_SERVICE;
+                break;
             
             default: 
-                RCLCPP_DEBUG(this->get_logger(), "Waiting...");
-                if (++failure_count_ > 10 ) {
-                    failure_count_ = 0;
-                    state_ = State::FAILURE;
-                    end_of_task = true;
-                }
                 break;
         }
     }
@@ -161,9 +164,9 @@ private:
     void publish_head_goal() {
         auto msg = std_msgs::msg::Float64MultiArray();
         if (target_is_specified_) {
-            msg.data = {current_target_val_, 0.0}; // Mover PAN, dejar tilt en 0
+            msg.data = {current_target_val_, 0.0}; 
         } else {
-            msg.data = {0.0, current_target_val_}; // Mover TILT, dejar pan en 0
+            msg.data = {0.0, current_target_val_}; 
         }
         head_gp_pub_->publish(msg);
     }
@@ -176,11 +179,6 @@ private:
 
     void call_vision_service() {
         auto client = target_is_specified_ ? identify_client_ : detect_client_;
-        if (!client->wait_for_service(2s)) {
-            state_ = State::FAILURE;
-            return;
-        }
-
         auto req = std::make_shared<faces_interfaces::srv::FaceRecog::Request>();
         if (target_is_specified_) req->name = target_name_;
 
@@ -188,46 +186,55 @@ private:
             auto result = future.get();
             if (result->success) {
                 this->last_bbox_ = result->bbox;
-                this->state_ = State::CALLING_BBOX_TO_POSE_SERVICE;
+                // Si lo identificó y no es Unknown, vamos a pose. Si es Unknown o solo detectó, registramos.
+                if (target_is_specified_ || (result->name != "Unknown" && !result->name.empty())) {
+                    this->state_ = State::CALLING_BBOX_TO_POSE_SERVICE;
+                } else {
+                    this->state_ = State::CALLING_REGISTER;
+                }
             } else {
                 this->next_step();
             }
         });
     }
 
-    void call_bbox_to_pose_service() {
-        if (!bbox2pose_client_->wait_for_service(1s)) {
-            RCLCPP_ERROR(this->get_logger(), "Depth service not available");
-            state_ = State::FAILURE;
-            return;
-        }
+    void call_register_service() {
+        auto req = std::make_shared<faces_interfaces::srv::FaceRecog::Request>();
+        req->name = target_is_specified_ ? target_name_ : "Person_" + std::to_string(this->now().seconds());
 
+        register_client_->async_send_request(req, [this](rclcpp::Client<faces_interfaces::srv::FaceRecog>::SharedFuture future) {
+            if (future.get()->success) this->state_ = State::CALLING_BBOX_TO_POSE_SERVICE;
+            else this->state_ = State::FAILURE;
+        });
+    }
+
+    void call_bbox_to_pose_service() {
         auto req = std::make_shared<vision_interfaces::srv::BboxToPose::Request>();
-        req->x1 = last_bbox_[0];
-        req->y1 = last_bbox_[1];
-        req->x2 = last_bbox_[2];
-        req->y2 = last_bbox_[3];
+        req->x1 = last_bbox_[0]; req->y1 = last_bbox_[1];
+        req->x2 = last_bbox_[2]; req->y2 = last_bbox_[3];
 
         bbox2pose_client_->async_send_request(req, [this](rclcpp::Client<vision_interfaces::srv::BboxToPose>::SharedFuture future) {
             auto res = future.get();
             if (res->success) {
-                // Llenamos el PointStamped para el look_at
                 this->final_goal.header.frame_id = res->pose.header.frame_id;
                 this->final_goal.point = res->pose.pose.position; 
                 this->state_ = State::LOOK_AT_TARGET;
             } else {
-                RCLCPP_ERROR(this->get_logger(), "Could not get XYZ from BBox");
                 this->state_ = State::FAILURE;
             }
         });
     }
 
+    void call_describe_service() {
+        auto req = std::make_shared<faces_interfaces::srv::FaceRecog::Request>();
+        describe_client_->async_send_request(req, [this](rclcpp::Client<faces_interfaces::srv::FaceRecog>::SharedFuture future) {
+            if (future.get()->success) this->state_ = State::SUCCESS;
+            else this->state_ = State::FAILURE;
+        });
+    }
+
     void next_step() {
         current_target_val_ += scan_step_;
-
-        // Lógica flexible para saber si terminamos el recorrido:
-        // Si el paso es positivo, terminamos al superar scan_end_
-        // Si el paso es negativo, terminamos al ser menores que scan_end_
         bool finished = (scan_step_ > 0) ? (current_target_val_ > scan_end_) 
                                          : (current_target_val_ < scan_end_);
 
@@ -238,7 +245,6 @@ private:
             state_ = State::MOVING_HEAD;
         }
     }
-
 
     // Variables de control
     State state_;
@@ -261,8 +267,7 @@ private:
     rclcpp::Publisher<std_msgs::msg::Float64MultiArray>::SharedPtr head_gp_pub_;
     rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr head_gr_sub;
     rclcpp::Publisher<geometry_msgs::msg::PointStamped>::SharedPtr head_look_at_pub_;
-    rclcpp::Client<faces_interfaces::srv::FaceRecog>::SharedPtr detect_client_;
-    rclcpp::Client<faces_interfaces::srv::FaceRecog>::SharedPtr identify_client_;
+    rclcpp::Client<faces_interfaces::srv::FaceRecog>::SharedPtr detect_client_, identify_client_, register_client_, describe_client_;
     rclcpp::Client<vision_interfaces::srv::BboxToPose>::SharedPtr bbox2pose_client_;
     rclcpp::Service<faces_interfaces::srv::FaceRecog>::SharedPtr task_service_;
 };
