@@ -133,67 +133,72 @@ private:
     }
 
     void call_vision_service() {
-        if (!vision_client_->wait_for_service(1s)) {
-            RCLCPP_ERROR(this->get_logger(), "Vision service not available");
-            next_step();
-            return;
-        }
-
-        auto req = std::make_shared<vision_interfaces::srv::GetDetections::Request>();
-        req->queries = {target_class_};
-
-        vision_client_->async_send_request(req, [this](rclcpp::Client<vision_interfaces::srv::GetDetections>::SharedFuture future) {
-            auto res = future.get();
-            if (res->success && !res->detections.empty()) {
-                
-                std::string clean_name = target_class_;
-                std::replace(clean_name.begin(), clean_name.end(), ' ', '_');
-                std::string target_frame = "OWL_" + clean_name;
-                try {
-                    auto tf_stamped = tf_buffer_->lookupTransform("base_link", target_frame, tf2::TimePointZero, 500ms);
-                    
-                    auto now_time = this->get_clock()->now();
-                    auto tf_time = rclcpp::Time(tf_stamped.header.stamp);
-                    double diff = (now_time.seconds() - tf_time.seconds());
-                    // LOG de depuración para que veas qué está pasando
-                    RCLCPP_INFO(this->get_logger(), "Validando TF: Now=%.2f, TF=%.2f, Diff=%.4f", 
-                               now_time.seconds(), tf_time.seconds(), diff);
-
-                    if (std::abs(diff) > 2.0) { 
-                       RCLCPP_WARN(this->get_logger(), "TF obsoleta. Edad real: %.4f s", diff);
-                        this->next_step();
-                        return;
-                    }
-                    //final_goal.header.frame_id = "base_link";
-                    //final_goal.header.stamp = this->now();
-                    final_goal.pose.position.x = tf_stamped.transform.translation.x;
-                    final_goal.pose.position.y = tf_stamped.transform.translation.y;
-                    final_goal.pose.position.z = tf_stamped.transform.translation.z;
-
-                    final_goal.pose.orientation = tf_stamped.transform.rotation;
-
-                    final_goal.header.frame_id = "base_link"; // Aseguramos que MoveIt sepa el origen
-                    final_goal.header.stamp.sec = 0;          // Tiempo 0 para evitar errores de extrapolación
-                    final_goal.header.stamp.nanosec = 0;
-
-                    // Ajuste para el look_at (accediendo correctamente a position.z)
-                    if (final_goal.pose.position.z < 0.1) final_goal.pose.position.z = 0.5; 
-
-                    this->detected_object_name = res->detections[0].class_name;
-                    state_ = State::LOOK_AT_TARGET;
-                    RCLCPP_INFO(this->get_logger(), "Success Target in base_link: [%.2f, %.2f, %.2f]", 
-                                final_goal.pose.position.x, final_goal.pose.position.y, final_goal.pose.position.z);
-
-                } catch (tf2::TransformException &ex) {
-                    RCLCPP_WARN(this->get_logger(), "TF2 Error: %s. Retrying next pose...", ex.what());
-                    this->next_step();
-                }
-            } else {
-                this->next_step();
-            }
-        });
+    if (!vision_client_->wait_for_service(1s)) {
+        RCLCPP_ERROR(this->get_logger(), "Vision service not available");
+        next_step();
+        return;
     }
 
+    auto req = std::make_shared<vision_interfaces::srv::GetDetections::Request>();
+    req->queries = {target_class_};
+
+    vision_client_->async_send_request(req, [this](rclcpp::Client<vision_interfaces::srv::GetDetections>::SharedFuture future) {
+        auto res = future.get();
+    
+        if (res->success && !res->detections.empty()) {
+            
+            // Tomamos la primera detección (usualmente la de mayor confianza)
+            auto first_det = res->detections[0];
+            std::string label = first_det.class_name;
+            std::replace(label.begin(), label.end(), ' ', '_');
+            std::string target_frame = "OWL_" + label + "_0"; 
+
+            try {
+                auto tf_stamped = tf_buffer_->lookupTransform("base_link", target_frame, tf2::TimePointZero, 700ms);
+                
+                auto now_time = this->get_clock()->now();
+                auto tf_time = rclcpp::Time(tf_stamped.header.stamp);
+                double diff = std::abs(now_time.seconds() - tf_time.seconds());
+
+                RCLCPP_INFO(this->get_logger(), "TF Encontrada: %s. Edad: %.4f s", target_frame.c_str(), diff);
+
+                if (diff > 2.0) { 
+                    RCLCPP_WARN(this->get_logger(), "TF obsoleta para %s. Reintentando...", target_frame.c_str());
+                    this->next_step();
+                    return;
+                }
+
+                // PoseStamped 
+                final_goal.pose.position.x = tf_stamped.transform.translation.x;
+                final_goal.pose.position.y = tf_stamped.transform.translation.y;
+                final_goal.pose.position.z = tf_stamped.transform.translation.z;
+                final_goal.pose.orientation = tf_stamped.transform.rotation;
+
+                final_goal.header.frame_id = "base_link"; 
+                final_goal.header.stamp.sec = 0; // Usar tiempo 0 evita errores de extrapolación en MoveIt
+                final_goal.header.stamp.nanosec = 0;
+
+                if (final_goal.pose.position.z < 0.05) final_goal.pose.position.z = 0.5; 
+
+                this->detected_object_name = first_det.class_name;
+                state_ = State::LOOK_AT_TARGET;
+                
+                RCLCPP_INFO(this->get_logger(), "Objetivo fijado: %s en [%.2f, %.2f, %.2f]", 
+                            this->detected_object_name.c_str(), 
+                            final_goal.pose.position.x, 
+                            final_goal.pose.position.y, 
+                            final_goal.pose.position.z);
+
+            } catch (tf2::TransformException &ex) {
+                RCLCPP_WARN(this->get_logger(), "No se pudo transformar %s: %s", target_frame.c_str(), ex.what());
+                this->next_step();
+            }
+        } else {
+            RCLCPP_INFO(this->get_logger(), "No se detectó '%s' en esta pose de escaneo.", target_class_.c_str());
+            this->next_step();
+        }
+    });
+}
     void next_step() {
         scan_idx_++;
         if (scan_idx_ >= scan_poses_.size()) {
