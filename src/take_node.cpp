@@ -44,7 +44,7 @@ public:
             rclcpp::CallbackGroupType::Reentrant);
 
         service_ = this->create_service<Take>(
-            "/take",
+            "take",
             std::bind(&TakeNode::takeCallback, this,
                       std::placeholders::_1, std::placeholders::_2),
              rmw_qos_profile_services_default,

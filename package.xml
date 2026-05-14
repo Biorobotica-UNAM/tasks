@@ -3,8 +3,8 @@
 <package format="3">
   <name>tasks</name>
   <version>0.0.0</version>
-  <description>TODO: Package description</description>
-  <maintainer email="rsandovr@gmail.com">pumas</maintainer>
+  <description>Robocup@HOME 2026 simple tasks</description>
+  <maintainer email="marco.soriano5102@comunidad.unam.mx">Marco Soriano</maintainer>
   <license>TODO: License declaration</license>
 
   <buildtool_depend>ament_cmake</buildtool_depend>
@@ -13,6 +13,9 @@
   <depend>std_srvs</depend>
   <depend>std_msgs</depend>
   <depend>geometry_msgs</depend>
+  <depend>tf2_ros</depend>
+  <depend>tf2_geometry_msgs</depend>
+  <depend>tf2</depend>
   <depend>vision_interfaces</depend>
   <depend>faces_interfaces</depend>
   <depend>take_interfaces</depend>
