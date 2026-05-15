@@ -133,49 +133,67 @@ private:
     }
 
     void call_vision_service() {
-    if (!vision_client_->wait_for_service(1s)) {
-        RCLCPP_ERROR(this->get_logger(), "Vision service not available");
-        next_step();
-        return;
-    }
+        if (!vision_client_->wait_for_service(1s)) {
+            RCLCPP_ERROR(this->get_logger(), "Vision service not available");
+            next_step();
+            return;
+        }
 
-    auto req = std::make_shared<vision_interfaces::srv::GetDetections::Request>();
-    req->queries = {target_class_};
+        auto req = std::make_shared<vision_interfaces::srv::GetDetections::Request>();
+        req->queries = {target_class_};
 
-    vision_client_->async_send_request(req, [this](rclcpp::Client<vision_interfaces::srv::GetDetections>::SharedFuture future) {
-        auto res = future.get();
-    
-        if (res->success && !res->detections.empty()) {
-            
-            // Tomamos la primera detección (usualmente la de mayor confianza)
-            auto first_det = res->detections[0];
-            std::string label = first_det.class_name;
-            std::replace(label.begin(), label.end(), ' ', '_');
-            std::string target_frame = "OWL_" + label + "_0"; 
-
-            try {
-                auto tf_stamped = tf_buffer_->lookupTransform("base_link", target_frame, tf2::TimePointZero, 700ms);
+        vision_client_->async_send_request(req, [this](rclcpp::Client<vision_interfaces::srv::GetDetections>::SharedFuture future) {
+            auto res = future.get();
+        
+            if (res->success && !res->detections.empty()) {
                 
+                auto first_det = res->detections[0];
+                std::string label = first_det.class_name;
+                std::replace(label.begin(), label.end(), ' ', '_');
+
                 auto now_time = this->get_clock()->now();
-                auto tf_time = rclcpp::Time(tf_stamped.header.stamp);
-                double diff = std::abs(now_time.seconds() - tf_time.seconds());
 
-                RCLCPP_INFO(this->get_logger(), "TF Encontrada: %s. Edad: %.4f s", target_frame.c_str(), diff);
+                std::string best_frame = "";
+                double best_age = 9999.0;
+                geometry_msgs::msg::TransformStamped best_tf;
 
-                if (diff > 2.0) { 
-                    RCLCPP_WARN(this->get_logger(), "TF obsoleta para %s. Reintentando...", target_frame.c_str());
+                for (int i = 0; i < 5; i++) {
+                    std::string candidate = "OWL_" + label + "_" + std::to_string(i);
+                    try {
+                        auto tf_stamped = tf_buffer_->lookupTransform("base_link", candidate, tf2::TimePointZero, 100ms);
+                        double age = std::abs(now_time.seconds() - rclcpp::Time(tf_stamped.header.stamp).seconds());
+                        if (age < best_age) {
+                            best_age = age;
+                            best_frame = candidate;
+                            best_tf = tf_stamped;
+                        }
+                    } catch (...) {
+                        break;  // no hay más instancias
+                    }
+                }
+
+                if (best_frame.empty()) {
+                    RCLCPP_WARN(this->get_logger(), "No se encontró ninguna TF para %s", label.c_str());
+                    this->next_step();
+                    return;
+                }
+
+                RCLCPP_INFO(this->get_logger(), "TF Encontrada: %s. Edad: %.4f s", best_frame.c_str(), best_age);
+
+                if (best_age > 2.0) { 
+                    RCLCPP_WARN(this->get_logger(), "TF obsoleta para %s. Reintentando...", best_frame.c_str());
                     this->next_step();
                     return;
                 }
 
                 // PoseStamped 
-                final_goal.pose.position.x = tf_stamped.transform.translation.x;
-                final_goal.pose.position.y = tf_stamped.transform.translation.y;
-                final_goal.pose.position.z = tf_stamped.transform.translation.z;
-                final_goal.pose.orientation = tf_stamped.transform.rotation;
+                final_goal.pose.position.x = best_tf.transform.translation.x;
+                final_goal.pose.position.y = best_tf.transform.translation.y;
+                final_goal.pose.position.z = best_tf.transform.translation.z;
+                final_goal.pose.orientation = best_tf.transform.rotation;
 
                 final_goal.header.frame_id = "base_link"; 
-                final_goal.header.stamp.sec = 0; // Usar tiempo 0 evita errores de extrapolación en MoveIt
+                final_goal.header.stamp.sec = 0;  // tiempo 0 evita errores de extrapolación en MoveIt
                 final_goal.header.stamp.nanosec = 0;
 
                 if (final_goal.pose.position.z < 0.05) final_goal.pose.position.z = 0.5; 
@@ -189,16 +207,13 @@ private:
                             final_goal.pose.position.y, 
                             final_goal.pose.position.z);
 
-            } catch (tf2::TransformException &ex) {
-                RCLCPP_WARN(this->get_logger(), "No se pudo transformar %s: %s", target_frame.c_str(), ex.what());
+            } else {
+                RCLCPP_INFO(this->get_logger(), "No se detectó '%s' en esta pose de escaneo.", target_class_.c_str());
                 this->next_step();
             }
-        } else {
-            RCLCPP_INFO(this->get_logger(), "No se detectó '%s' en esta pose de escaneo.", target_class_.c_str());
-            this->next_step();
-        }
-    });
-}
+        });
+    }
+
     void next_step() {
         scan_idx_++;
         if (scan_idx_ >= scan_poses_.size()) {
@@ -235,7 +250,6 @@ private:
     geometry_msgs::msg::PoseStamped final_goal;
     std::string target_class_;
     
-    // VARIABLES DECLARADAS PARA SOLUCIONAR ERRORES
     std::shared_ptr<std::promise<void>> task_promise_; 
 
     std::vector<std::pair<float, float>> scan_poses_ = {
