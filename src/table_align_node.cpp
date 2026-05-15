@@ -126,7 +126,7 @@ private:
       break;
 
     case State::GET_ALIGNMENT:
-      angle_ = vision_->getTableAlignment();
+      angle_ = vision_->GetTableAlignment();
       RCLCPP_INFO(node_->get_logger(), "[ALIGNMENT] angle=%f", angle_);
       if (std::fabs(angle_) <= kAngleTolerance_) {
         state_ = State::SUCCESS;
@@ -143,7 +143,7 @@ private:
         break;  
       }*/
       
-      angle_ = vision_->getTableAlignment();
+      angle_ = vision_->GetTableAlignment();
       //RCLCPP_INFO(node_->get_logger(), "[ROTATE] angle=%f", angle_);
 
       if (std::fabs(angle_) <= kAngleTolerance_) {
