@@ -18,6 +18,7 @@ find_package(manipulation_controller_interfaces REQUIRED)
 find_package(geometry_msgs REQUIRED)
 find_package(manipulation_tools REQUIRED)
 find_package(human_interfaces REQUIRED)
+find_package(torso_interfaces REQUIRED)
 find_package(tf2 REQUIRED)             
 find_package(tf2_ros REQUIRED)
 find_package(tf2_geometry_msgs REQUIRED)
@@ -53,7 +54,8 @@ ament_target_dependencies(find_waving_node
   rclcpp 
   std_srvs 
   std_msgs 
-  human_interfaces 
+  human_interfaces
+  torso_interfaces
   geometry_msgs
 )
 
