@@ -142,13 +142,13 @@ public:
         }
     }
 
-    void call_torso_service(float height) {
+    void call_torso_service(float goal_position) {
         if (!torso_client_->wait_for_service(500ms)) {
             state_ = State::MOVING_HEAD;
             return;
         }
         auto req = std::make_shared<torso_interfaces::srv::MoveTorso::Request>();
-        req->height = height; 
+        req->position = goal_position; 
         torso_client_->async_send_request(req, [this](rclcpp::Client<torso_interfaces::srv::MoveTorso>::SharedFuture future) {
             state_ = State::MOVING_HEAD;
         });
