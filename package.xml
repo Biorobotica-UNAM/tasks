@@ -19,6 +19,7 @@
   <depend>vision_interfaces</depend>
   <depend>faces_interfaces</depend>
   <depend>take_interfaces</depend>
+  <depend>torso_interfaces</depend>
   <depend>human_interfaces</depend>
   <depend>vision_tools</depend>
   <depend>manipulation_planner_interfaces</depend>
