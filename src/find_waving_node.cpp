@@ -68,6 +68,7 @@ public:
 
         scan_idx_ = 0;
         end_of_task_ = false;
+        human_found_ = false;
         target_pan_ = scan_poses_[scan_idx_].first;
         target_tilt_ = scan_poses_[scan_idx_].second;
         
@@ -144,13 +145,22 @@ public:
 
     void call_torso_service(float goal_position) {
         if (!torso_client_->wait_for_service(500ms)) {
-            state_ = State::MOVING_HEAD;
+            // Si no hay servicio, continuar según el estado anterior
+            if (human_found_) {
+                state_ = State::LOOK_AT_TARGET;
+            } else {
+                state_ = State::MOVING_HEAD;
+            }
             return;
         }
         auto req = std::make_shared<torso_interfaces::srv::MoveTorso::Request>();
         req->position = goal_position; 
         torso_client_->async_send_request(req, [this](rclcpp::Client<torso_interfaces::srv::MoveTorso>::SharedFuture future) {
-            state_ = State::MOVING_HEAD;
+            if (human_found_) {
+                state_ = State::LOOK_AT_TARGET;
+            } else {
+                state_ = State::MOVING_HEAD;  
+            }
         });
     }
 
@@ -163,8 +173,10 @@ public:
         vision_client_->async_send_request(req, [this](rclcpp::Client<human_interfaces::srv::DetectPointing>::SharedFuture future) {
             auto res = future.get();
             if (res->human_detected) {
-                state_ = State::LOOK_AT_TARGET;
+                human_found_ = true;
+                state_ = State::MOVING_TORSO;
             } else {
+                human_found_ = false;
                 this->next_step();
             }
         });
@@ -179,7 +191,7 @@ public:
         target_pan_ = scan_poses_[scan_idx_].first;
         target_tilt_ = scan_poses_[scan_idx_].second;
 
-        if (scan_idx_ == 3) {
+        if (scan_idx_ == 2) {
             state_ = State::MOVING_TORSO;
         } else {
             state_ = State::MOVING_HEAD;
@@ -203,6 +215,7 @@ public:
     float target_tilt_ = 0.0;
     uint8_t stabilize_count_ = 0;
     std::atomic<bool> end_of_task_{false};
+    bool human_found_ = false;
     geometry_msgs::msg::PointStamped final_goal;
 
     std::vector<std::pair<float, float>> scan_poses_ = {
